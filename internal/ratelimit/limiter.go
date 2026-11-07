@@ -2,7 +2,6 @@ package ratelimit
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -40,7 +39,7 @@ func DefaultConfig() Config {
 func LoadConfig(getenv func(string) string) (Config, error) {
 	config := DefaultConfig()
 	var err error
-	if config.MaxConcurrentRequests, err = intSetting(getenv, "ATLAS_MAX_CONCURRENT_REQUESTS", config.MaxConcurrentRequests, 1, 100000); err != nil {
+	if config.MaxConcurrentRequests, err = intSetting(getenv, "ATLAS_MAX_CONCURRENT_REQUESTS", config.MaxConcurrentRequests, 1, 10000); err != nil {
 		return Config{}, err
 	}
 	if config.RequestsPerAPIKey, err = intSetting(getenv, "ATLAS_RATE_LIMIT_PER_KEY", config.RequestsPerAPIKey, 0, 1000000); err != nil {
@@ -49,7 +48,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if config.RequestsPerIP, err = intSetting(getenv, "ATLAS_RATE_LIMIT_PER_IP", config.RequestsPerIP, 0, 1000000); err != nil {
 		return Config{}, err
 	}
-	if config.MaxClients, err = intSetting(getenv, "ATLAS_RATE_LIMIT_MAX_CLIENTS", config.MaxClients, 1, 1000000); err != nil {
+	if config.MaxClients, err = intSetting(getenv, "ATLAS_RATE_LIMIT_MAX_CLIENTS", config.MaxClients, 1, 100000); err != nil {
 		return Config{}, err
 	}
 	if raw := strings.TrimSpace(getenv("ATLAS_RATE_LIMIT_WINDOW")); raw != "" {
