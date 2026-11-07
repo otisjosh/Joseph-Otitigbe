@@ -97,7 +97,17 @@ paths:
           $ref: '#/components/responses/MethodNotAllowed'
         '409':
           description: The normalized email is already in use.
-          $ref: '#/components/responses/Conflict'
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: duplicate_record
+                  message: a record with this email already exists
         '413':
           $ref: '#/components/responses/RequestTooLarge'
         '500':
