@@ -66,6 +66,16 @@ go run ./cmd/atlas provision-key --name recovered-admin --role admin
 
 Store the one-time output in the approved secret manager, verify the new admin can authenticate, then revoke compromised keys through the API. This recovery path requires database operator access and does not expose or reset existing key secrets. If the database itself is unavailable, use the organization's PostgreSQL backup and access recovery process.
 
+## OpenAPI validation
+
+To validate the OpenAPI 3.1 document locally, install Node.js 22.12 or newer with npm 10.9.2 or newer, then run the same pinned Redocly CLI version used by CI:
+
+```sh
+npx --yes @redocly/cli@2.76.0 lint docs/openapi.yaml
+```
+
+The repository's `redocly.yaml` checks OpenAPI structure and references and treats invalid request, response, and schema examples as errors. CI runs this validation alongside the existing PostgreSQL 16 Go checks.
+
 ## Tests and static analysis
 
 Set `DATABASE_URL` to a PostgreSQL 16 test database before running the full suite. Integration tests skip when it is unset. GitHub Actions provisions a disposable PostgreSQL 16 service.
