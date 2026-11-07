@@ -109,8 +109,9 @@ func routes(keyStore *postgres.KeyStore, recordStore *postgres.Store, pinger obs
 	if len(limiters) > 0 {
 		limiter = limiters[0]
 	}
-	handler := auth.MiddlewareWithLimiter(keyStore, mux, limiter)
+	var handler http.Handler = auth.Middleware(keyStore, mux)
 	if limiter != nil {
+		handler = auth.MiddlewareWithLimiter(keyStore, mux, limiter)
 		handler = limiter.Middleware(handler)
 	}
 	return observability.RequestLogging(logger, handler)
