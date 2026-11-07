@@ -147,6 +147,10 @@ type Principal struct {
 
 type principalContextKey struct{}
 
+func ContextWithPrincipal(ctx context.Context, principal Principal) context.Context {
+	return context.WithValue(ctx, principalContextKey{}, principal)
+}
+
 func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	principal, ok := ctx.Value(principalContextKey{}).(Principal)
 	return principal, ok
@@ -211,7 +215,7 @@ func Middleware(store KeyStore, next http.Handler) http.Handler {
 			return
 		}
 		principal := Principal{KeyID: credential.ID, Role: credential.Role, Permissions: credential.Permissions}
-		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
+		ctx := ContextWithPrincipal(r.Context(), principal)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -225,7 +229,7 @@ func RequiredPermission(method, path string) (Permission, bool) {
 		return PermissionRecordsRead, true
 	case strings.HasPrefix(path, "/records/"):
 		return PermissionRecordsRead, true
-	case path == "/api-keys" || strings.HasPrefix(path, "/api-keys/") || path == "/roles":
+	case path == "/api-keys" || strings.HasPrefix(path, "/api-keys/") || path == "/roles" || path == "/audit-logs":
 		return PermissionKeysManage, true
 	default:
 		return "", false

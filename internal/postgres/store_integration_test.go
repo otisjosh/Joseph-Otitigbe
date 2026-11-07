@@ -44,8 +44,8 @@ func TestMigrationsAreVersionedAndIdempotent(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM atlas_schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migration versions: %v", err)
 	}
-	if count != 6 {
-		t.Fatalf("applied migration count = %d, want 6", count)
+	if count != 7 {
+		t.Fatalf("applied migration count = %d, want 7", count)
 	}
 }
 
