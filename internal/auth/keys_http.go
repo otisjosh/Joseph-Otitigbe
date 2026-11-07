@@ -148,6 +148,8 @@ func writeManagerError(w http.ResponseWriter, err error, fallback string) {
 		writeError(w, http.StatusBadRequest, "invalid_role", "role must be reader, writer, or admin")
 	case errors.Is(err, ErrInvalidKeyName):
 		writeError(w, http.StatusBadRequest, "invalid_key_name", "key name must be between 1 and 100 characters")
+	case errors.Is(err, ErrLastAdmin):
+		writeError(w, http.StatusConflict, "last_admin_required", "the last active administrator API key cannot be revoked or downgraded")
 	case errors.Is(err, ErrKeyNotFound):
 		writeError(w, http.StatusNotFound, "api_key_not_found", "API key not found")
 	case errors.Is(err, ErrKeyStorageUnavailable):

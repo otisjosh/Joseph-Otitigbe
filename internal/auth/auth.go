@@ -35,6 +35,7 @@ var (
 	ErrInvalidRole             = errors.New("invalid role")
 	ErrInvalidKeyName          = errors.New("invalid API key name")
 	ErrKeyStorageUnavailable   = errors.New("API key storage unavailable")
+	ErrLastAdmin             = errors.New("cannot remove the last active administrator")
 )
 
 const apiKeyPrefix = "atlas_"

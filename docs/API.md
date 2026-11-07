@@ -48,7 +48,7 @@ All endpoints below require `keys:manage`.
 - `GET /api-keys` — list safe key metadata, including revoked keys.
 - `POST /api-keys` — provision a key. Request: `{"name":"reporting job","role":"reader"}`. Returns `201`, metadata, and the raw `api_key` once. Response has `Cache-Control: no-store`.
 - `PATCH /api-keys/{id}/role` — change an active key's role. Request: `{"role":"writer"}`.
-- `DELETE /api-keys/{id}` — revoke an active key. Revoked keys cannot authenticate again.
+- `DELETE /api-keys/{id}` — revoke an active key. Revoked keys cannot authenticate again. The last active administrator key cannot be revoked or downgraded; these attempts return `409 last_admin_required`.
 
 The one-time CLI bootstrap uses `DATABASE_URL` and the same key generator:
 `go run ./cmd/atlas provision-key --name initial-admin --role admin`.

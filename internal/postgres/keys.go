@@ -129,31 +129,99 @@ func (s *KeyStore) ListKeys(ctx context.Context) ([]auth.KeyMetadata, error) {
 	return keys, nil
 }
 
-func (s *KeyStore) RevokeKey(ctx context.Context, id int64, actor *int64) (auth.KeyMetadata, error) {
-	query := `UPDATE atlas_api_keys SET revoked_at = now(), revoked_by_key_id = $2
-		WHERE id = $1 AND revoked_at IS NULL RETURNING ` + keyMetadataColumns
-	metadata, err := scanKeyMetadata(s.pool.QueryRow(ctx, query, id, actor))
+const adminMutationLockID int64 = 0x41544c4153
+
+func lockAdminMutations(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", adminMutationLockID); err != nil {
+		return fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	return nil
+}
+
+func activeKeyRole(ctx context.Context, tx pgx.Tx, id int64) (auth.Role, error) {
+	var role auth.Role
+	err := tx.QueryRow(ctx, `SELECT role_name FROM atlas_api_keys
+		WHERE id = $1 AND revoked_at IS NULL FOR UPDATE`, id).Scan(&role)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return auth.KeyMetadata{}, auth.ErrKeyNotFound
+		return "", auth.ErrKeyNotFound
 	}
 	if err != nil {
+		return "", fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	return role, nil
+}
+
+func ensureAnotherAdmin(ctx context.Context, tx pgx.Tx) error {
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM atlas_api_keys
+		WHERE role_name = $1 AND revoked_at IS NULL`, string(auth.RoleAdmin)).Scan(&count); err != nil {
+		return fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	if count <= 1 {
+		return auth.ErrLastAdmin
+	}
+	return nil
+}
+
+func (s *KeyStore) RevokeKey(ctx context.Context, id int64, actor *int64) (auth.KeyMetadata, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAdminMutations(ctx, tx); err != nil {
+		return auth.KeyMetadata{}, err
+	}
+	role, err := activeKeyRole(ctx, tx, id)
+	if err != nil {
+		return auth.KeyMetadata{}, err
+	}
+	if role == auth.RoleAdmin {
+		if err := ensureAnotherAdmin(ctx, tx); err != nil {
+			return auth.KeyMetadata{}, err
+		}
+	}
+	query := `UPDATE atlas_api_keys SET revoked_at = now(), revoked_by_key_id = $2
+		WHERE id = $1 AND revoked_at IS NULL RETURNING ` + keyMetadataColumns
+	metadata, err := scanKeyMetadata(tx.QueryRow(ctx, query, id, actor))
+	if err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
 	return metadata, nil
 }
 
 func (s *KeyStore) ChangeKeyRole(ctx context.Context, id int64, role auth.Role, actor *int64) (auth.KeyMetadata, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAdminMutations(ctx, tx); err != nil {
+		return auth.KeyMetadata{}, err
+	}
+	currentRole, err := activeKeyRole(ctx, tx, id)
+	if err != nil {
+		return auth.KeyMetadata{}, err
+	}
+	if currentRole == auth.RoleAdmin && role != auth.RoleAdmin {
+		if err := ensureAnotherAdmin(ctx, tx); err != nil {
+			return auth.KeyMetadata{}, err
+		}
+	}
 	query := `UPDATE atlas_api_keys SET role_name = $2, role_changed_at = now(), role_changed_by_key_id = $3
 		WHERE id = $1 AND revoked_at IS NULL RETURNING ` + keyMetadataColumns
-	metadata, err := scanKeyMetadata(s.pool.QueryRow(ctx, query, id, string(role), actor))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return auth.KeyMetadata{}, auth.ErrKeyNotFound
-	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-		return auth.KeyMetadata{}, auth.ErrInvalidRole
-	}
+	metadata, err := scanKeyMetadata(tx.QueryRow(ctx, query, id, string(role), actor))
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return auth.KeyMetadata{}, auth.ErrInvalidRole
+		}
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
 	return metadata, nil

@@ -40,9 +40,12 @@ All endpoints except `GET /healthz` require an API key in `Authorization: Bearer
 | Writer | Retrieve and create records |
 | Admin | Retrieve/create records; provision, inspect, revoke, and change roles for API keys |
 
-Roles are predefined and their permissions are seeded by migrations. Admins can assign one of these roles to an API key; custom roles and custom permission definitions are not supported.
+Roles are predefined and their permissions are seeded by migrations. Admins can assign one of these roles to an API key; custom roles and custom permission definitions are not supported. Atlas prevents revoking or downgrading the last active administrator, including concurrent admin requests.
 
 See [API.md](docs/API.md) for endpoint details and error responses. New keys are shown only in the create response; list, role-change, and revoke responses contain safe metadata only.
+
+## Administrator recovery
+If all administrator credentials are lost or compromised, an operator with authorized PostgreSQL access can provision a replacement directly from a trusted deployment checkout: `go run ./cmd/atlas provision-key --name recovered-admin --role admin`. Store the one-time output in the approved secret manager, verify the new admin can authenticate, then revoke any compromised keys using the API. This recovery path requires database operator access and does not expose or reset existing key secrets. If the database itself is unavailable, restore service using the organization's PostgreSQL backup and access recovery process.
 
 ## Data and security notes
 The PostgreSQL pool uses parameterized queries. The schema and ordered migrations are in `internal/postgres/migrations`; applied versions are tracked in `atlas_schema_migrations`. API keys do not currently expire automatically. Deploy the HTTP service behind a trusted HTTPS endpoint; this server does not terminate TLS itself.
