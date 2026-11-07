@@ -19,7 +19,7 @@ export DATABASE_URL='postgres://<user>:<password>@localhost:5432/atlas?sslmode=d
 export ATLAS_ADDR=':8080'
 ```
 
-Use `sslmode=disable` only for trusted local PostgreSQL. Use TLS verification for deployed databases, such as `sslmode=require` or your provider's stronger certificate-verification configuration. URL-encode reserved characters in connection credentials.
+Use `sslmode=disable` only for trusted local PostgreSQL. Require TLS for deployed databases. Prefer certificate and hostname verification with `sslmode=verify-full` and your provider's trusted CA configuration; use `sslmode=require` only when encryption without server identity verification is an accepted deployment policy. URL-encode reserved characters in connection credentials.
 
 ## Database migrations
 
