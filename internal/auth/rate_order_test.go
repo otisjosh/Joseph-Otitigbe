@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
-
-
 )
 
 type touchCountingStore struct {
@@ -25,7 +23,13 @@ type keyDecisionLimiter struct {
 }
 
 func (l keyDecisionLimiter) AllowRemoteAddr(string, http.ResponseWriter) bool { return true }
-func (l keyDecisionLimiter) AllowAPIKey(int64, http.ResponseWriter) bool { return l.allowKey }
+func (l keyDecisionLimiter) AllowAPIKey(_ int64, w http.ResponseWriter) bool {
+	if l.allowKey {
+		return true
+	}
+	writeError(w, http.StatusTooManyRequests, "rate_limited", "request rate limit exceeded")
+	return false
+}
 
 type revokeAfterLookupStore struct {
 	KeyStore
