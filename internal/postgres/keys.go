@@ -13,6 +13,14 @@ import (
 	"github.com/otisjosh/Joseph-Otitigbe/internal/auth"
 )
 
+func createKeyAuditDetails(role auth.Role, expiresAt *time.Time) map[string]string {
+	details := map[string]string{"role": string(role)}
+	if expiresAt != nil {
+		details["expires_at"] = expiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	return details
+}
+
 type KeyStore struct {
 	pool *pgxpool.Pool
 }
@@ -30,10 +38,10 @@ type rowScanner interface {
 func scanKeyMetadata(row rowScanner) (auth.KeyMetadata, error) {
 	var metadata auth.KeyMetadata
 	var createdBy, revokedBy, roleChangedBy pgtype.Int8
-	var revokedAt, lastUsedAt, roleChangedAt pgtype.Timestamptz
+	var revokedAt, lastUsedAt, roleChangedAt, expiresAt pgtype.Timestamptz
 	err := row.Scan(
 		&metadata.ID, &metadata.PublicID, &metadata.Name, &metadata.Role, &metadata.CreatedAt,
-		&createdBy, &revokedAt, &revokedBy, &lastUsedAt, &roleChangedAt, &roleChangedBy,
+		&createdBy, &revokedAt, &revokedBy, &lastUsedAt, &roleChangedAt, &roleChangedBy, &expiresAt,
 	)
 	if err != nil {
 		return auth.KeyMetadata{}, err
@@ -56,25 +64,33 @@ func scanKeyMetadata(row rowScanner) (auth.KeyMetadata, error) {
 		metadata.LastUsedAt = &value
 	}
 	if roleChangedAt.Valid {
-		value := roleChangedAt.Time
+		value := roleChangedAt.Time.UTC()
 		metadata.RoleChangedAt = &value
+	}
+	if expiresAt.Valid {
+		value := expiresAt.Time.UTC()
+		metadata.ExpiresAt = &value
 	}
 	return metadata, nil
 }
 
 const keyMetadataColumns = `id, public_id, name, role_name, created_at,
 	created_by_key_id, revoked_at, revoked_by_key_id, last_used_at,
-	role_changed_at, role_changed_by_key_id`
+	role_changed_at, role_changed_by_key_id, expires_at`
 
 func (s *KeyStore) CreateKey(ctx context.Context, name string, role auth.Role, publicID string, hash []byte, createdBy *int64) (auth.KeyMetadata, error) {
+	return s.CreateKeyWithExpiry(ctx, name, role, publicID, hash, nil, createdBy)
+}
+
+func (s *KeyStore) CreateKeyWithExpiry(ctx context.Context, name string, role auth.Role, publicID string, hash []byte, expiresAt *time.Time, createdBy *int64) (auth.KeyMetadata, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	query := `INSERT INTO atlas_api_keys (name, role_name, public_id, key_hash, created_by_key_id)
-		VALUES ($1, $2, $3, $4, $5) RETURNING ` + keyMetadataColumns
-	metadata, err := scanKeyMetadata(tx.QueryRow(ctx, query, name, string(role), publicID, hash, createdBy))
+	query := `INSERT INTO atlas_api_keys (name, role_name, public_id, key_hash, created_by_key_id, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING ` + keyMetadataColumns
+	metadata, err := scanKeyMetadata(tx.QueryRow(ctx, query, name, string(role), publicID, hash, createdBy, expiresAt))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && (pgErr.Code == "23503" || pgErr.Code == "23514") {
@@ -82,7 +98,7 @@ func (s *KeyStore) CreateKey(ctx context.Context, name string, role auth.Role, p
 		}
 		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
-	if err := insertAuditEvent(ctx, tx, audit.Event{ActorKeyID: createdBy, Action: "api_key.created", ResourceType: "api_key", ResourceID: &metadata.ID, Details: map[string]string{"role": string(role)}}); err != nil {
+	if err := insertAuditEvent(ctx, tx, audit.Event{ActorKeyID: createdBy, Action: "api_key.created", ResourceType: "api_key", ResourceID: &metadata.ID, Details: createKeyAuditDetails(role, expiresAt)}); err != nil {
 		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -92,17 +108,22 @@ func (s *KeyStore) CreateKey(ctx context.Context, name string, role auth.Role, p
 }
 
 func (s *KeyStore) LookupKey(ctx context.Context, publicID string) (auth.Credential, error) {
-	const query = `SELECT k.id, k.public_id, k.key_hash, k.role_name, r.permissions
+	const query = `SELECT k.id, k.public_id, k.key_hash, k.role_name, r.permissions, k.expires_at
 		FROM atlas_api_keys AS k JOIN atlas_roles AS r ON r.role_name = k.role_name
-		WHERE k.public_id = $1 AND k.revoked_at IS NULL`
+		WHERE k.public_id = $1 AND k.revoked_at IS NULL
+		AND (k.expires_at IS NULL OR k.expires_at > now())`
 	var credential auth.Credential
 	var permissions []string
-	err := s.pool.QueryRow(ctx, query, publicID).Scan(&credential.ID, &credential.PublicID, &credential.Hash, &credential.Role, &permissions)
+	err := s.pool.QueryRow(ctx, query, publicID).Scan(&credential.ID, &credential.PublicID, &credential.Hash, &credential.Role, &permissions, &credential.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.Credential{}, auth.ErrInvalidKey
 	}
 	if err != nil {
 		return auth.Credential{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	if credential.ExpiresAt != nil {
+		value := credential.ExpiresAt.UTC()
+		credential.ExpiresAt = &value
 	}
 	credential.Permissions = make([]auth.Permission, len(permissions))
 	for i, permission := range permissions {
@@ -113,7 +134,8 @@ func (s *KeyStore) LookupKey(ctx context.Context, publicID string) (auth.Credent
 
 func (s *KeyStore) TouchKey(ctx context.Context, id int64) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE atlas_api_keys SET last_used_at = now()
-		WHERE id = $1 AND revoked_at IS NULL`, id)
+		WHERE id = $1 AND revoked_at IS NULL
+		AND (expires_at IS NULL OR expires_at > now())`, id)
 	if err != nil {
 		return fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
