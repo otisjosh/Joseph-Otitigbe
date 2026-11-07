@@ -100,7 +100,7 @@ func TestAPIKeyRotationRejectsExpiredRevokedAndLastAdminDowngrade(t *testing.T) 
 	if err != nil { t.Fatal(err) }
 	if _, err := pool.Exec(ctx, "UPDATE atlas_api_keys SET expires_at = $1 WHERE id = $2", time.Now().UTC().Add(-time.Minute), expiredAdmin.ID); err != nil { t.Fatal(err) }
 
-	_, _, err := manager.Create(ctx, fmt.Sprintf("rotation-writer-%d", time.Now().UnixNano()), auth.RoleWriter, &admin.ID)
+	_, _, err = manager.Create(ctx, fmt.Sprintf("rotation-writer-%d", time.Now().UnixNano()), auth.RoleWriter, &admin.ID)
 	if err != nil { t.Fatal(err) }
 	downgrade := auth.RoleWriter
 	if _, _, err := manager.Rotate(ctx, admin.ID, &downgrade, nil, nil); !errors.Is(err, auth.ErrLastAdmin) {
