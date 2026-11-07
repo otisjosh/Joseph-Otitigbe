@@ -21,6 +21,10 @@ type migration struct {
 var migrations = []migration{
 	{version: 1, up: "migrations/000001_create_records.up.sql"},
 	{version: 2, up: "migrations/000002_unique_normalized_email.up.sql"},
+	{version: 3, up: "migrations/000003_create_roles.up.sql"},
+	{version: 4, up: "migrations/000004_seed_roles.up.sql"},
+	{version: 5, up: "migrations/000005_create_api_keys.up.sql"},
+	{version: 6, up: "migrations/000006_index_api_keys.up.sql"},
 }
 
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
