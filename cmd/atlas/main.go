@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/otisjosh/Joseph-Otitigbe/internal/audit"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/auth"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/postgres"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/records"
@@ -48,12 +49,14 @@ func routes(keyStore *postgres.KeyStore, recordStore *postgres.Store) http.Handl
 	mux := http.NewServeMux()
 	recordHandler := records.NewHandler(recordStore)
 	keyHandler := auth.NewKeyHandler(auth.NewKeyManager(keyStore))
+	auditHandler := audit.NewHandler(keyStore.AuditStore())
 	mux.Handle("/healthz", recordHandler)
 	mux.Handle("/records", recordHandler)
 	mux.Handle("/records/", recordHandler)
 	mux.Handle("/api-keys", keyHandler)
 	mux.Handle("/api-keys/", keyHandler)
 	mux.Handle("/roles", keyHandler)
+	mux.Handle("/audit-logs", auditHandler)
 	return auth.Middleware(keyStore, mux)
 }
 

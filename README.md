@@ -42,6 +42,8 @@ All endpoints except `GET /healthz` require an API key in `Authorization: Bearer
 
 Roles are predefined and their permissions are seeded by migrations. Admins can assign one of these roles to an API key; custom roles and custom permission definitions are not supported. Atlas prevents revoking or downgrading the last active administrator, including concurrent admin requests.
 
+Successful record creation and API key administration changes are written to an append-only audit event table in the same transaction as each change. Admins can inspect the newest events with `GET /audit-logs`; credentials and record contents are excluded. The current trail does not include reads or failed authentication attempts, and retention must be managed operationally.
+
 See [API.md](docs/API.md) for endpoint details and error responses. New keys are shown only in the create response; list, role-change, and revoke responses contain safe metadata only.
 
 ## Administrator recovery

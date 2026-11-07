@@ -25,6 +25,7 @@ var migrations = []migration{
 	{version: 4, up: "migrations/000004_seed_roles.up.sql"},
 	{version: 5, up: "migrations/000005_create_api_keys.up.sql"},
 	{version: 6, up: "migrations/000006_index_api_keys.up.sql"},
+	{version: 7, up: "migrations/000007_create_audit_events.up.sql"},
 }
 
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {

@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/otisjosh/Joseph-Otitigbe/internal/audit"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/auth"
 )
 
@@ -19,6 +20,8 @@ type KeyStore struct {
 func NewKeyStore(pool *pgxpool.Pool) *KeyStore {
 	return &KeyStore{pool: pool}
 }
+
+func (s *KeyStore) AuditStore() *AuditStore { return NewAuditStore(s.pool) }
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -64,14 +67,25 @@ const keyMetadataColumns = `id, public_id, name, role_name, created_at,
 	role_changed_at, role_changed_by_key_id`
 
 func (s *KeyStore) CreateKey(ctx context.Context, name string, role auth.Role, publicID string, hash []byte, createdBy *int64) (auth.KeyMetadata, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
 	query := `INSERT INTO atlas_api_keys (name, role_name, public_id, key_hash, created_by_key_id)
 		VALUES ($1, $2, $3, $4, $5) RETURNING ` + keyMetadataColumns
-	metadata, err := scanKeyMetadata(s.pool.QueryRow(ctx, query, name, string(role), publicID, hash, createdBy))
+	metadata, err := scanKeyMetadata(tx.QueryRow(ctx, query, name, string(role), publicID, hash, createdBy))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && (pgErr.Code == "23503" || pgErr.Code == "23514") {
 			return auth.KeyMetadata{}, auth.ErrInvalidRole
 		}
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	if err := insertAuditEvent(ctx, tx, audit.Event{ActorKeyID: createdBy, Action: "api_key.created", ResourceType: "api_key", ResourceID: &metadata.ID, Details: map[string]string{"role": string(role)}}); err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
 	return metadata, nil
@@ -187,6 +201,9 @@ func (s *KeyStore) RevokeKey(ctx context.Context, id int64, actor *int64) (auth.
 	if err != nil {
 		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
+	if err := insertAuditEvent(ctx, tx, audit.Event{ActorKeyID: actor, Action: "api_key.revoked", ResourceType: "api_key", ResourceID: &metadata.ID}); err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
@@ -219,6 +236,9 @@ func (s *KeyStore) ChangeKeyRole(ctx context.Context, id int64, role auth.Role, 
 		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
 			return auth.KeyMetadata{}, auth.ErrInvalidRole
 		}
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	if err := insertAuditEvent(ctx, tx, audit.Event{ActorKeyID: actor, Action: "api_key.role_changed", ResourceType: "api_key", ResourceID: &metadata.ID, Details: map[string]string{"role": string(role)}}); err != nil {
 		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
 	if err := tx.Commit(ctx); err != nil {

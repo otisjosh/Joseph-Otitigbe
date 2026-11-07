@@ -49,6 +49,7 @@ All endpoints below require `keys:manage`.
 - `POST /api-keys` — provision a key. Request: `{"name":"reporting job","role":"reader"}`. Returns `201`, metadata, and the raw `api_key` once. Response has `Cache-Control: no-store`.
 - `PATCH /api-keys/{id}/role` — change an active key's role. Request: `{"role":"writer"}`.
 - `DELETE /api-keys/{id}` — revoke an active key. Revoked keys cannot authenticate again. The last active administrator key cannot be revoked or downgraded; these attempts return `409 last_admin_required`.
+- `GET /audit-logs?limit=100&before_id=123` — list up to 500 newest audit events, optionally paging toward older events using the exclusive event ID cursor. Requires `keys:manage`.
 
 The one-time CLI bootstrap uses `DATABASE_URL` and the same key generator:
 `go run ./cmd/atlas provision-key --name initial-admin --role admin`.
@@ -60,5 +61,7 @@ The CLI writes the key once to stdout and does not log it.
 - `401 invalid_api_key` — bearer key is malformed, unknown, incorrect, or revoked.
 - `403 permission_denied` — key is valid but its role lacks the required permission.
 - `503 authentication_unavailable` — PostgreSQL could not validate or manage a key.
+
+The audit trail records successful record creation and API key creation, role changes, and revocation, with actor key ID, event time, resource type/ID, and safe metadata. It is append-only through the API. Read requests and failed authentication attempts are not currently recorded. Events omit API keys, hashes, record names, and emails.
 
 Error messages do not contain API keys or stored hashes.
