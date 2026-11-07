@@ -1,0 +1,16 @@
+.git
+.github
+.env*
+**/.env*
+docs/
+README.md
+CONTRIBUTING.md
+redocly.yaml
+*_test.go
+**/*_test.go
+coverage*
+coverage.out
+bin/
+tmp/
+*.dump
+*.backup

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,11 +50,40 @@ func newServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
-func openDatabase(ctx context.Context) (*postgres.KeyStore, *postgres.Store, *pgxpool.Pool, error) {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if strings.TrimSpace(databaseURL) == "" {
-		return nil, nil, nil, errors.New("DATABASE_URL is required")
+func loadDatabaseURL(getenv func(string) string) (string, error) {
+	databaseURL := strings.TrimSpace(getenv("DATABASE_URL"))
+	if databaseURL == "" {
+		return "", errors.New("DATABASE_URL is required")
 	}
+	if _, err := pgxpool.ParseConfig(databaseURL); err != nil {
+		return "", errors.New("DATABASE_URL is invalid")
+	}
+	return databaseURL, nil
+}
+
+func loadListenAddress(getenv func(string) string) (string, error) {
+	addr := getenv("ATLAS_ADDR")
+	if addr == "" {
+		return ":8080", nil
+	}
+	if strings.TrimSpace(addr) != addr {
+		return "", errors.New("ATLAS_ADDR must be a valid host:port address")
+	}
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return "", errors.New("ATLAS_ADDR must be a valid host:port address")
+	}
+	return addr, nil
+}
+
+func openDatabase(ctx context.Context) (*postgres.KeyStore, *postgres.Store, *pgxpool.Pool, error) {
+	databaseURL, err := loadDatabaseURL(os.Getenv)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return openDatabaseURL(ctx, databaseURL)
+}
+
+func openDatabaseURL(ctx context.Context, databaseURL string) (*postgres.KeyStore, *postgres.Store, *pgxpool.Pool, error) {
 	pool, err := postgres.Open(ctx, databaseURL)
 	if err != nil {
 		return nil, nil, nil, err
@@ -77,28 +108,45 @@ func routes(keyStore *postgres.KeyStore, recordStore *postgres.Store, pinger obs
 }
 
 func runServer() error {
+	databaseURL, err := loadDatabaseURL(os.Getenv)
+	if err != nil {
+		return err
+	}
+	addr, err := loadListenAddress(os.Getenv)
+	if err != nil {
+		return err
+	}
+
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 20*time.Second)
-	keyStore, recordStore, closer, err := openDatabase(startupCtx)
+	keyStore, recordStore, closer, err := openDatabaseURL(startupCtx, databaseURL)
 	cancelStartup()
 	if err != nil {
 		return err
 	}
-	defer closer.Close()
 
-	addr := os.Getenv("ATLAS_ADDR")
-	if addr == "" {
-		addr = ":8080"
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		closer.Close()
+		return fmt.Errorf("listen on configured ATLAS_ADDR: %w", err)
 	}
+
 	logger := newJSONLogger(os.Stderr)
 	server := newServer(addr, routes(keyStore, recordStore, closer, logger))
 	server.ErrorLog = log.New(safeHTTPErrorWriter{logger: logger}, "", 0)
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	return serveHTTP(shutdownCtx, server, listener, closer.Close, logger)
+}
+
+func serveHTTP(ctx context.Context, server *http.Server, listener net.Listener, closeDatabase func(), logger *slog.Logger) error {
+	if closeDatabase != nil {
+		defer closeDatabase()
+	}
 	serverErrors := make(chan error, 1)
 	go func() {
 		logger.Info("server_started")
-		serverErrors <- server.ListenAndServe()
+		serverErrors <- server.Serve(listener)
 	}()
 
 	select {
@@ -107,10 +155,10 @@ func runServer() error {
 			return nil
 		}
 		return err
-	case <-shutdownCtx.Done():
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
+		if err := server.Shutdown(shutdownCtx); err != nil {
 			_ = server.Close()
 			return err
 		}
@@ -121,7 +169,6 @@ func runServer() error {
 		return nil
 	}
 }
-
 func provisionKey(args []string) error {
 	flags := flag.NewFlagSet("provision-key", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
