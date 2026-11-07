@@ -299,6 +299,84 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api-keys/{id}/rotate:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Positive API key database ID without leading zeroes.
+        schema:
+          type: string
+          pattern: '^[1-9][0-9]*$'
+    post:
+      operationId: rotateAPIKey
+      summary: Atomically rotate an API key
+      description: |
+        Requires keys:manage. Creates a replacement key and revokes the active,
+        non-expired source key in one PostgreSQL transaction. The role and expiry
+        are inherited unless explicit replacements are supplied. Omitted or null
+        expires_at preserves the source expiry. The one-time secret is never
+        returned again; a successful rotation is audited without credentials.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/APIKeyRotationInput'
+            examples:
+              inherit:
+                summary: Preserve the source role and expiry
+                value: {}
+              replaceRoleAndExpiry:
+                summary: Explicitly set replacement role and expiry
+                value:
+                  role: writer
+                  expires_at: '2027-01-01T00:00:00Z'
+      responses:
+        '201':
+          description: Replacement created; api_key is shown only once.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+            Pragma:
+              schema:
+                type: string
+                const: no-cache
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIKeyProvisioned'
+              example:
+                id: 12
+                public_id: <opaque-new-public-selector>
+                name: reporting job
+                role: writer
+                created_at: '2026-01-01T12:00:00Z'
+                expires_at: '2027-01-01T00:00:00Z'
+                api_key: <returned-once-secret>
+        '400':
+          description: Malformed JSON, invalid role, or expiry that is not in the future.
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Source key is missing, revoked, or expired.
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '409':
+          description: Rotation would remove the last active administrator.
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api-keys/{id}:
     parameters:
       - name: id
@@ -597,6 +675,19 @@ components:
           maxLength: 100
         role:
           $ref: '#/components/schemas/RoleName'
+    APIKeyRotationInput:
+      type: object
+      additionalProperties: false
+      properties:
+        role:
+          anyOf:
+            - $ref: '#/components/schemas/RoleName'
+            - type: 'null'
+          description: Optional replacement role; omitted or null preserves the source role.
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+          description: Optional future RFC 3339 timestamp to replace the source expiry. Omitted or null preserves the source expiry; this field cannot clear an existing expiry.
     RoleInput:
       type: object
       additionalProperties: false

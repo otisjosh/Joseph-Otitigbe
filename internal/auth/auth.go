@@ -37,6 +37,7 @@ var (
 	ErrInvalidExpiry           = errors.New("API key expiry must be in the future")
 	ErrKeyStorageUnavailable   = errors.New("API key storage unavailable")
 	ErrLastAdmin             = errors.New("cannot remove the last active administrator")
+	ErrRotationUnavailable    = errors.New("API key rotation unavailable")
 )
 
 const apiKeyPrefix = "atlas_"
@@ -74,6 +75,10 @@ type Credential struct {
 
 type ExpiringKeyStore interface {
 	CreateKeyWithExpiry(ctx context.Context, name string, role Role, publicID string, hash []byte, expiresAt *time.Time, createdBy *int64) (KeyMetadata, error)
+}
+
+type RotatingKeyStore interface {
+	RotateKey(ctx context.Context, oldID int64, newPublicID string, newHash []byte, role *Role, expiresAt *time.Time, actor *int64) (KeyMetadata, error)
 }
 
 type KeyStore interface {
@@ -137,6 +142,44 @@ func (m *KeyManager) CreateWithExpiry(ctx context.Context, name string, role Rol
 	} else {
 		return KeyMetadata{}, "", ErrKeyStorageUnavailable
 	}
+	if err != nil {
+		return KeyMetadata{}, "", err
+	}
+	return metadata, token, nil
+}
+
+func (m *KeyManager) Rotate(ctx context.Context, id int64, role *Role, expiresAt *time.Time, actor *int64) (KeyMetadata, string, error) {
+	if id < 1 {
+		return KeyMetadata{}, "", ErrKeyNotFound
+	}
+	if role != nil && !ValidRole(*role) {
+		return KeyMetadata{}, "", ErrInvalidRole
+	}
+	if expiresAt != nil {
+		expiry := expiresAt.UTC()
+		if !m.now().UTC().Before(expiry) {
+			return KeyMetadata{}, "", ErrInvalidExpiry
+		}
+		expiresAt = &expiry
+	}
+	store, ok := m.store.(RotatingKeyStore)
+	if !ok {
+		return KeyMetadata{}, "", ErrRotationUnavailable
+	}
+	publicBytes := make([]byte, 16)
+	secret := make([]byte, 32)
+	if _, err := io.ReadFull(m.random, publicBytes); err != nil {
+		return KeyMetadata{}, "", fmt.Errorf("generate API key identifier: %w", err)
+	}
+	if _, err := io.ReadFull(m.random, secret); err != nil {
+		return KeyMetadata{}, "", fmt.Errorf("generate API key secret: %w", err)
+	}
+	defer clear(secret)
+
+	publicID := base64.RawURLEncoding.EncodeToString(publicBytes)
+	token := apiKeyPrefix + publicID + "." + base64.RawURLEncoding.EncodeToString(secret)
+	hash := sha256.Sum256(secret)
+	metadata, err := store.RotateKey(ctx, id, publicID, hash[:], role, expiresAt, actor)
 	if err != nil {
 		return KeyMetadata{}, "", err
 	}

@@ -111,9 +111,9 @@ Do not add `--clean` or `--create` when performing a verification restore. After
 - Every request receives a generated `X-Request-ID` response header.
 - Structured JSON logs include method, route template, status, duration, and request ID. Logs exclude raw paths, query strings, headers, request bodies, credentials, API keys, and record fields.
 
-All routes except the two public probes require a bearer API key. Reader keys retrieve records; writer keys retrieve and create records; admins manage API keys, built-in roles, and audit logs. Permissions are predefined. The last active administrator cannot be revoked or downgraded.
+All routes except the two public probes require a bearer API key. Reader keys retrieve records; writer keys retrieve and create records; admins manage API keys, built-in roles, and audit logs. Permissions are predefined. The last active administrator cannot be revoked or downgraded. Admins can rotate keys with `POST /api-keys/{id}/rotate`; rotation atomically creates a new one-time credential and revokes its source key. The role and expiry are inherited unless explicitly replaced, and an expiry is never silently removed.
 
-Successful record creation and API-key creation, role changes, and revocations are recorded transactionally in the audit table. Audit events omit API keys, hashes, record names, and emails. Reads and failed authentication attempts are not currently recorded.
+Successful record creation and API-key creation, rotation, role changes, and revocations are recorded transactionally in the audit table. Audit events omit API keys, hashes, record names, and emails. Reads and failed authentication attempts are not currently recorded.
 
 ## Administrator recovery
 
@@ -157,4 +157,4 @@ go vet ./...
 
 ## Security notes
 
-API keys may be provisioned with an optional UTC expiry. Omitted or `NULL` expiry means the key does not expire, including existing keys. Expiry is enforced during authentication and expired keys are rejected before protected handlers. Rotation is not part of this feature. The HTTP server does not terminate TLS; deploy it behind a trusted HTTPS endpoint. Store database credentials and one-time API keys using approved secret-management tools. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
+API keys may be provisioned with an optional UTC expiry. Omitted or `NULL` expiry means the key does not expire, including existing keys. Expiry is enforced during authentication and expired keys are rejected before protected handlers. Rotation creates the replacement and revokes its source in one audited database transaction. The replacement keeps the source role and expiry unless an explicit role or future expiry is supplied; omitted or null expiry never clears a configured expiry. The last active administrator cannot be rotated to a non-admin role. Store the returned secret securely because it is shown only once. The HTTP server does not terminate TLS; deploy it behind a trusted HTTPS endpoint. Store database credentials and one-time API keys using approved secret-management tools. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.

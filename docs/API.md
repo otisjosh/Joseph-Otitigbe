@@ -68,6 +68,7 @@ All key and role-management endpoints require `keys:manage`.
 
 - `GET /api-keys` lists safe metadata, including revoked keys. It never returns API keys or stored hashes.
 - `POST /api-keys` provisions a key from `{"name":"reporting job","role":"reader"}`. An optional `expires_at` accepts an RFC 3339 timestamp; Atlas normalizes it to UTC and requires it to be strictly in the future. Omit it or send `null` for a non-expiring key. Omitted expiry preserves compatibility with existing clients and existing NULL-expiry keys remain valid. The `201` response includes metadata and `api_key` once. It sets `Cache-Control: no-store` and `Pragma: no-cache`.
+- `POST /api-keys/{id}/rotate` atomically creates a replacement and revokes the active, non-expired source key. The new secret is returned once with `201` and no-store headers.
 - `PATCH /api-keys/{id}/role` changes an active key's role with `{"role":"writer"}`.
 - `DELETE /api-keys/{id}` revokes an active key.
 - `GET /roles` lists the built-in roles and their permissions.
@@ -86,7 +87,17 @@ A successful key provisioning response contains safe metadata plus the one-time 
 }
 ```
 
-The placeholder is illustrative; Atlas returns the actual key only once. Capture it in an approved secret manager. Key list, creation, role-change, and revocation responses include `expires_at` as an RFC 3339 UTC timestamp or `null`. Expired keys receive the same `401 invalid_api_key` response as other invalid credentials and never reach protected handlers. An expiry equal to the current instant is expired. The last active administrator key cannot be revoked or downgraded; those operations return `409 last_admin_required`.
+Rotate a key with an empty object to inherit its role and expiry:
+
+```sh
+curl -i -X POST "${ATLAS_BASE_URL}/api-keys/11/rotate" \
+  -H "Authorization: Bearer ${ATLAS_API_KEY}" \
+  -H "Content-Type: application/json" \
+  --data '{}'
+```
+
+The `201` response contains the replacement `api_key` exactly once and sets `Cache-Control: no-store`. Rotation revokes the source and creates the replacement in one PostgreSQL transaction. You may explicitly provide a new role or a future `expires_at`; an omitted or `null` expiry preserves the source expiry, so rotation never silently removes an existing expiry. A `null` source expiry remains non-expiring. Missing, revoked, expired, or invalid source keys return `404 api_key_not_found`. The last active admin cannot rotate to a non-admin role. Successful rotations are recorded as `api_key.rotated` with old/replacement database IDs and safe role/expiry metadata, never a secret or hash.
+The placeholder is illustrative; Atlas returns the actual key only once. Capture it in an approved secret manager. Key list, creation, rotation, role-change, and revocation responses include `expires_at` as an RFC 3339 UTC timestamp or `null`. Expired keys receive the same `401 invalid_api_key` response as other invalid credentials and never reach protected handlers. An expiry equal to the current instant is expired. The last active administrator key cannot be revoked or downgraded; those operations return `409 last_admin_required`.
 
 ## Audit logs and pagination
 

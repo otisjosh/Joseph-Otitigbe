@@ -3,8 +3,8 @@ package postgres
 import (
 	"context"
 	"errors"
-	"time"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -191,13 +191,104 @@ func activeKeyRole(ctx context.Context, tx pgx.Tx, id int64) (auth.Role, error) 
 func ensureAnotherAdmin(ctx context.Context, tx pgx.Tx) error {
 	var count int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM atlas_api_keys
-		WHERE role_name = $1 AND revoked_at IS NULL`, string(auth.RoleAdmin)).Scan(&count); err != nil {
+		WHERE role_name = $1 AND revoked_at IS NULL
+		AND (expires_at IS NULL OR expires_at > clock_timestamp())`, string(auth.RoleAdmin)).Scan(&count); err != nil {
 		return fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
 	if count <= 1 {
 		return auth.ErrLastAdmin
 	}
 	return nil
+}
+
+// RotateKey atomically creates a replacement credential, revokes the source, and audits the change.
+func (s *KeyStore) RotateKey(ctx context.Context, oldID int64, newPublicID string, newHash []byte, requestedRole *auth.Role, requestedExpiry *time.Time, actor *int64) (auth.KeyMetadata, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAdminMutations(ctx, tx); err != nil {
+		return auth.KeyMetadata{}, err
+	}
+
+	var name string
+	var oldRole auth.Role
+	var oldExpiry pgtype.Timestamptz
+	err = tx.QueryRow(ctx, `SELECT name, role_name, expires_at FROM atlas_api_keys
+		WHERE id = $1 AND revoked_at IS NULL
+		AND (expires_at IS NULL OR expires_at > clock_timestamp())
+		FOR UPDATE`, oldID).Scan(&name, &oldRole, &oldExpiry)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.KeyMetadata{}, auth.ErrKeyNotFound
+	}
+	if err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+
+	newRole := oldRole
+	if requestedRole != nil {
+		newRole = *requestedRole
+	}
+	if oldRole == auth.RoleAdmin && newRole != auth.RoleAdmin {
+		if err := ensureAnotherAdmin(ctx, tx); err != nil {
+			return auth.KeyMetadata{}, err
+		}
+	}
+	var newExpiry *time.Time
+	if oldExpiry.Valid {
+		value := oldExpiry.Time.UTC()
+		newExpiry = &value
+	}
+	if requestedExpiry != nil {
+		var future bool
+		if err := tx.QueryRow(ctx, "SELECT $1::timestamptz > clock_timestamp()", requestedExpiry.UTC()).Scan(&future); err != nil {
+			return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+		}
+		if !future {
+			return auth.KeyMetadata{}, auth.ErrInvalidExpiry
+		}
+		value := requestedExpiry.UTC()
+		newExpiry = &value
+	}
+
+	insert := `INSERT INTO atlas_api_keys (name, role_name, public_id, key_hash, created_by_key_id, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING ` + keyMetadataColumns
+	replacement, err := scanKeyMetadata(tx.QueryRow(ctx, insert, name, string(newRole), newPublicID, newHash, actor, newExpiry))
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && (pgErr.Code == "23503" || pgErr.Code == "23514") {
+			return auth.KeyMetadata{}, auth.ErrInvalidRole
+		}
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+
+	tag, err := tx.Exec(ctx, `UPDATE atlas_api_keys SET revoked_at = now(), revoked_by_key_id = $2
+		WHERE id = $1 AND revoked_at IS NULL
+		AND (expires_at IS NULL OR expires_at > clock_timestamp())`, oldID, actor)
+	if err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	if tag.RowsAffected() != 1 {
+		return auth.KeyMetadata{}, auth.ErrKeyNotFound
+	}
+	details := map[string]string{
+		"replacement_key_id": fmt.Sprintf("%d", replacement.ID),
+		"role":               string(newRole),
+	}
+	if newExpiry != nil {
+		details["expires_at"] = newExpiry.UTC().Format(time.RFC3339Nano)
+	}
+	if err := insertAuditEvent(ctx, tx, audit.Event{
+		ActorKeyID: actor, Action: "api_key.rotated", ResourceType: "api_key",
+		ResourceID: &oldID, Details: details,
+	}); err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+	}
+	return replacement, nil
 }
 
 func (s *KeyStore) RevokeKey(ctx context.Context, id int64, actor *int64) (auth.KeyMetadata, error) {
