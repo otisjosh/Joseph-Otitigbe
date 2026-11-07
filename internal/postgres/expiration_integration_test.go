@@ -19,7 +19,7 @@ func TestAPIKeyExpirationPersistenceAuthenticationAndSafeListing(t *testing.T) {
 	defer cancel()
 	store := NewKeyStore(pool)
 	manager := auth.NewKeyManager(store)
-	future := time.Now().UTC().Add(time.Hour)
+	future := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
 	futureMetadata, futureToken, err := manager.CreateWithExpiry(ctx, fmt.Sprintf("future-%d", time.Now().UnixNano()), auth.RoleReader, &future, nil)
 	if err != nil { t.Fatalf("create future-expiring key: %v", err) }
 	legacyMetadata, legacyToken, err := manager.Create(ctx, fmt.Sprintf("legacy-%d", time.Now().UnixNano()), auth.RoleReader, nil)
