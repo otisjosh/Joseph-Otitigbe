@@ -1,62 +1,75 @@
 # Atlas – Enterprise Data Intelligence Platform
 
-Atlas is a Go service for managing enterprise data records. PostgreSQL stores records, roles, and hashed API-key credentials.
+Atlas is a Go HTTP API for enterprise records, PostgreSQL persistence, API-key authentication, role-based authorization, audit events, and operational probes.
 
-## Requirements
-- Go 1.25 or newer
-- PostgreSQL 14 or newer
+## Prerequisites
 
-## Configuration
-Set `DATABASE_URL` through your local environment or secret manager. The blank template in `.env.example` contains no credentials; do not commit populated `.env` files or API keys.
+- Go 1.25 or newer.
+- PostgreSQL 16 for the supported CI and integration-test configuration.
+- A PostgreSQL database role authorized to create Atlas tables, indexes, and migration metadata.
 
-Example connection string shape (substitute credentials from a secure source):
-```text
-postgres://<user>:<password>@<host>:5432/<database>?sslmode=require
+## PostgreSQL and environment setup
+
+Install and start PostgreSQL 16 using your platform's package manager or approved development environment. Create a local database named `atlas` (for example, with `createdb atlas`) and configure its local role according to your PostgreSQL installation.
+
+Set `DATABASE_URL` from your local environment or approved secret manager. The safe template in `.env.example` is a reference only; Go does not load `.env` files automatically. Export values into the process environment. Never commit populated environment files or credentials.
+
+```sh
+export DATABASE_URL='postgres://<user>:<password>@localhost:5432/atlas?sslmode=disable'
+export ATLAS_ADDR=':8080'
 ```
 
-Use `sslmode=disable` only with trusted local PostgreSQL. The server listens on `:8080` by default; set `ATLAS_ADDR` to change it.
+Use `sslmode=disable` only for trusted local PostgreSQL. Use TLS verification for deployed databases, such as `sslmode=require` or your provider's stronger certificate-verification configuration. URL-encode reserved characters in connection credentials.
 
-## First admin key and server startup
-Create the initial admin key using a trusted operator shell with database access:
+## Database migrations
+
+Atlas applies pending versioned migrations automatically when the API starts. The `provision-key` command uses the same database startup path and applies pending migrations before provisioning. The configured database role must be allowed to create the migration tracking table, application tables, and indexes. Applied versions are tracked in `atlas_schema_migrations`; SQL migration files are under `internal/postgres/migrations`. There is no separate migration command.
+
+## Run Atlas locally
+
+Provision the first administrator key from an authorized operator shell:
+
 ```sh
 go run ./cmd/atlas provision-key --name initial-admin --role admin
 ```
 
-The command prints the new key once as JSON to stdout. Capture it directly into your approved secret manager. The database stores only the SHA-256 hash of the random key secret. Do not paste the output into logs, tickets, or source control.
+The command returns the plaintext API key once as JSON on stdout. Capture it directly into an approved secret manager. Do not paste the output into logs, tickets, or source control.
 
-Start the API:
+Start the HTTP API:
+
 ```sh
 go run ./cmd/atlas
 ```
 
-Atlas checks the database connection and applies pending versioned migrations before serving requests. It emits structured JSON logs to stderr using `log/slog`; each HTTP log contains only method, route template, status, duration, and a generated request ID. Raw paths, query strings, headers, request bodies, API keys, database credentials, and record contents are excluded. On SIGINT or SIGTERM, it drains active HTTP requests before closing the PostgreSQL pool.
+The server listens on `:8080` by default; set `ATLAS_ADDR` to change it. On SIGINT or SIGTERM, Atlas drains active HTTP requests before closing its PostgreSQL pool.
 
-## Operational endpoints
-`GET /healthz` is a lightweight liveness check and does not query PostgreSQL. `GET /readyz` performs a PostgreSQL ping with a two-second timeout and returns `503` with a safe JSON error when the database is unavailable. Both endpoints are public for deployment probes. Every request receives a fresh generated `X-Request-ID` response header; caller-supplied IDs are not trusted.
+## API contract and operations
 
-## Authentication and roles
-`GET /healthz` and `GET /readyz` are public and do not require an API key. All other endpoints require an API key in `Authorization: Bearer <api_key>`.
+- [API guide](docs/API.md)
+- [OpenAPI 3.1 specification](docs/openapi.yaml)
+- `GET /healthz` is a public liveness probe and does not query PostgreSQL.
+- `GET /readyz` is a public readiness probe with a two-second PostgreSQL ping timeout.
+- Every request receives a generated `X-Request-ID` response header.
+- Structured JSON logs include method, route template, status, duration, and request ID. Logs exclude raw paths, query strings, headers, request bodies, credentials, API keys, and record fields.
 
-| Role | Permissions |
-|---|---|
-| Reader | Retrieve records |
-| Writer | Retrieve and create records |
-| Admin | Retrieve/create records; provision, inspect, revoke, and change roles for API keys |
+All routes except the two public probes require a bearer API key. Reader keys retrieve records; writer keys retrieve and create records; admins manage API keys, built-in roles, and audit logs. Permissions are predefined. The last active administrator cannot be revoked or downgraded.
 
-Roles are predefined and their permissions are seeded by migrations. Admins can assign one of these roles to an API key; custom roles and custom permission definitions are not supported. Atlas prevents revoking or downgrading the last active administrator, including concurrent admin requests.
-
-Successful record creation and API key administration changes are written to an append-only audit event table in the same transaction as each change. Admins can inspect the newest events with `GET /audit-logs`; credentials and record contents are excluded. The current trail does not include reads or failed authentication attempts, and retention must be managed operationally.
-
-See [API.md](docs/API.md) for endpoint details and error responses. New keys are shown only in the create response; list, role-change, and revoke responses contain safe metadata only.
+Successful record creation and API-key creation, role changes, and revocations are recorded transactionally in the audit table. Audit events omit API keys, hashes, record names, and emails. Reads and failed authentication attempts are not currently recorded.
 
 ## Administrator recovery
-If all administrator credentials are lost or compromised, an operator with authorized PostgreSQL access can provision a replacement directly from a trusted deployment checkout: `go run ./cmd/atlas provision-key --name recovered-admin --role admin`. Store the one-time output in the approved secret manager, verify the new admin can authenticate, then revoke any compromised keys using the API. This recovery path requires database operator access and does not expose or reset existing key secrets. If the database itself is unavailable, restore service using the organization's PostgreSQL backup and access recovery process.
 
-## Data and security notes
-The PostgreSQL pool uses parameterized queries. The schema and ordered migrations are in `internal/postgres/migrations`; applied versions are tracked in `atlas_schema_migrations`. API keys do not currently expire automatically. Deploy the HTTP service behind a trusted HTTPS endpoint; this server does not terminate TLS itself.
+If all administrator credentials are lost or compromised, an operator with authorized PostgreSQL access can provision a replacement directly from a trusted deployment checkout:
 
-## Development and tests
-With PostgreSQL available and `DATABASE_URL` set:
+```sh
+go run ./cmd/atlas provision-key --name recovered-admin --role admin
+```
+
+Store the one-time output in the approved secret manager, verify the new admin can authenticate, then revoke compromised keys through the API. This recovery path requires database operator access and does not expose or reset existing key secrets. If the database itself is unavailable, use the organization's PostgreSQL backup and access recovery process.
+
+## Tests and static analysis
+
+Set `DATABASE_URL` to a PostgreSQL 16 test database before running the full suite. Integration tests skip when it is unset. GitHub Actions provisions a disposable PostgreSQL 16 service.
+
 ```sh
 go test ./...
 go test -race ./...
@@ -64,6 +77,6 @@ go test -cover ./...
 go vet ./...
 ```
 
-Integration tests skip locally when `DATABASE_URL` is unset. GitHub Actions starts a disposable PostgreSQL 16 service for them.
+## Security notes
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
+API keys do not currently expire automatically. The HTTP server does not terminate TLS; deploy it behind a trusted HTTPS endpoint. Store database credentials and one-time API keys using approved secret-management tools. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.

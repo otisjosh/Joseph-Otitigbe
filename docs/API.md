@@ -1,71 +1,133 @@
 # Atlas API
 
-All responses use JSON except the empty `GET /healthz` response. Error responses use the same shape:
+The authoritative machine-readable contract is [OpenAPI 3.1](openapi.yaml). All error responses from documented application endpoints use:
+
 ```json
 {"error":{"code":"permission_denied","message":"the API key does not have permission for this operation"}}
 ```
 
-## Request IDs and logging
-Every request receives a new random request ID in the `X-Request-ID` response header. Atlas does not trust or reuse caller-supplied request IDs. Structured JSON logs are written to stderr and include method, route template, response status, duration in milliseconds, and request ID. Raw URL paths and query strings, headers, request bodies, API keys, database credentials, passwords, and record fields are not logged.
-
 ## Authentication
 
-`GET /healthz` and `GET /readyz` are public and do not require an API key. Send an API key on all other routes:
+`GET /healthz` and `GET /readyz` are public and do not require an API key. All other documented endpoints require a bearer key:
+
 ```http
-Authorization: Bearer atlas_<public-id>.<secret>
+Authorization: Bearer ${ATLAS_API_KEY}
 ```
 
-API keys have a random public selector and a 256-bit random secret. Only the SHA-256 hash of the secret is stored in PostgreSQL. The raw key is returned once by provisioning and cannot be retrieved later.
+For example, set `ATLAS_API_KEY` from a secure secret store and `ATLAS_BASE_URL` to the service address:
 
-## Roles
+```sh
+curl -i -H "Authorization: Bearer ${ATLAS_API_KEY}" \
+  "${ATLAS_BASE_URL}/records/42"
+```
 
-| Role | Permissions |
-|---|---|
-| `reader` | `records:read` |
-| `writer` | `records:read`, `records:write` |
-| `admin` | Reader and writer permissions, plus `keys:manage` |
+Reader keys can retrieve records; writer keys can retrieve and create records; admin keys can manage API keys, role assignments, and audit logs. Roles and permissions are predefined.
 
-## Endpoints
+## Request IDs
 
-### Public health
+Every response from Atlas includes a fresh `X-Request-ID` response header containing 32 lowercase hexadecimal characters. Atlas generates the ID and replaces any caller-supplied value. Use the response ID when reporting an issue. Structured request logs include the ID with method, route template, status, and duration.
 
-- `GET /healthz` — lightweight liveness response; no API key required and no database query is made.
-- `GET /readyz` — checks PostgreSQL with a two-second bounded timeout; returns `200` when ready or a safe `503` JSON error. No database details are included; no API key required.
+## Public operational endpoints
 
-### Records
+- `GET /healthz` is a lightweight liveness probe. It does not query PostgreSQL. Success is `200 OK` with an empty body.
+- `GET /readyz` pings PostgreSQL using a two-second context timeout. Success is `200 OK` with `{"status":"ready"}`; failure is `503 Service Unavailable` with a generic JSON error that contains no connection details.
 
-- `GET /records/{id}` — requires `records:read`; returns a record.
-- `POST /records` — requires `records:write`; creates a record.
+```sh
+curl -i "${ATLAS_BASE_URL}/healthz"
+curl -i "${ATLAS_BASE_URL}/readyz"
+```
 
-Request:
+## Records
+
+Create a record with `POST /records` (requires `records:write`):
+
+```sh
+curl -i -X POST "${ATLAS_BASE_URL}/records" \
+  -H "Authorization: Bearer ${ATLAS_API_KEY}" \
+  -H "Content-Type: application/json" \
+  --data '{"name":"Ada Lovelace","email":"ada@example.com"}'
+```
+
+Request body:
+
 ```json
 {"name":"Ada Lovelace","email":"ada@example.com"}
 ```
 
-Existing record response and validation behavior are preserved. Duplicate email returns `409`; malformed input or IDs return `400`; missing records return `404`; storage failures return `503`.
+A successful response is `201 Created`:
 
-### Admin: API keys and role assignments
+```json
+{"id":42,"name":"Ada Lovelace","email":"ada@example.com"}
+```
 
-All endpoints below require `keys:manage`.
+Retrieve the record using `GET /records/{id}` (requires `records:read`). IDs must be positive base-10 integers without leading zeroes. Email validation requires a valid address with a multi-label domain; the service rejects display-name syntax and malformed domain labels.
 
-- `GET /roles` — list built-in roles and permissions.
-- `GET /api-keys` — list safe key metadata, including revoked keys.
-- `POST /api-keys` — provision a key. Request: `{"name":"reporting job","role":"reader"}`. Returns `201`, metadata, and the raw `api_key` once. Response has `Cache-Control: no-store`.
-- `PATCH /api-keys/{id}/role` — change an active key's role. Request: `{"role":"writer"}`.
-- `DELETE /api-keys/{id}` — revoke an active key. Revoked keys cannot authenticate again. The last active administrator key cannot be revoked or downgraded; these attempts return `409 last_admin_required`.
-- `GET /audit-logs?limit=100&before_id=123` — list up to 500 newest audit events, optionally paging toward older events using the exclusive event ID cursor. Requires `keys:manage`.
+## API keys and roles
 
-The one-time CLI bootstrap uses `DATABASE_URL` and the same key generator:
-`go run ./cmd/atlas provision-key --name initial-admin --role admin`.
-The CLI writes the key once to stdout and does not log it.
+All key and role-management endpoints require `keys:manage`.
 
-### Authentication and authorization errors
+- `GET /api-keys` lists safe metadata, including revoked keys. It never returns API keys or stored hashes.
+- `POST /api-keys` provisions a key from `{"name":"reporting job","role":"reader"}`. The `201` response includes metadata and `api_key` once. It sets `Cache-Control: no-store` and `Pragma: no-cache`.
+- `PATCH /api-keys/{id}/role` changes an active key's role with `{"role":"writer"}`.
+- `DELETE /api-keys/{id}` revokes an active key.
+- `GET /roles` lists the built-in roles and their permissions.
 
-- `401 authentication_required` — bearer key is missing.
-- `401 invalid_api_key` — bearer key is malformed, unknown, incorrect, or revoked.
-- `403 permission_denied` — key is valid but its role lacks the required permission.
-- `503 authentication_unavailable` — PostgreSQL could not validate or manage a key.
+A successful key provisioning response contains safe metadata plus the one-time key value:
 
-The audit trail records successful record creation and API key creation, role changes, and revocation, with actor key ID, event time, resource type/ID, and safe metadata. It is append-only through the API. Read requests and failed authentication attempts are not currently recorded. Events omit API keys, hashes, record names, and emails.
+```json
+{
+  "id": 11,
+  "public_id": "<opaque-public-selector>",
+  "name": "reporting job",
+  "role": "reader",
+  "created_at": "2026-01-01T12:00:00Z",
+  "api_key": "<returned-once-value>"
+}
+```
 
-Error messages do not contain API keys or stored hashes.
+The placeholder is illustrative; Atlas returns the actual key only once. Capture it in an approved secret manager. The last active administrator key cannot be revoked or downgraded; those operations return `409 last_admin_required`.
+
+## Audit logs and pagination
+
+`GET /audit-logs` requires `keys:manage` and returns up to 500 events, newest first. The default `limit` is 100. `before_id` is an exclusive cursor: pass the final event ID from the previous page to request older events.
+
+```text
+GET /audit-logs?limit=100
+GET /audit-logs?limit=100&before_id=123
+```
+
+A successful response has an `events` array:
+
+```json
+{
+  "events": [
+    {
+      "id": 122,
+      "occurred_at": "2026-01-01T12:00:00Z",
+      "actor_key_id": 3,
+      "action": "record.created",
+      "resource_type": "record",
+      "resource_id": 42,
+      "details": {}
+    }
+  ]
+}
+```
+
+An empty page is returned as `{"events":[]}`. Events record successful record creation and API-key creation, role changes, and revocation. They omit API keys, hashes, record names, and emails. Reads and failed authentication attempts are not currently recorded.
+
+## Errors and methods
+
+| Status | Meaning | Common codes |
+|---|---|---|
+| `400` | Invalid JSON, fields, IDs, or pagination | `invalid_json`, `invalid_record`, `invalid_record_id`, `invalid_api_key_id`, `invalid_limit`, `invalid_before_id`, `invalid_role` |
+| `401` | Missing, malformed, incorrect, or revoked API key | `authentication_required`, `invalid_api_key` |
+| `403` | Valid key lacks the required permission | `permission_denied` |
+| `404` | Record or active API key does not exist | `not_found`, `api_key_not_found` |
+| `405` | Method is unsupported; response includes an `Allow` header | `method_not_allowed` |
+| `409` | Duplicate record email or last-admin guard | `duplicate_record`, `last_admin_required` |
+| `413` | Record body exceeds the 1 MiB limit | `request_too_large` |
+| `500` | Unexpected record or key-management error | `internal_error` |
+| `503` | Storage, authentication, audit, or readiness dependency unavailable | `storage_unavailable`, `authentication_unavailable`, `audit_unavailable`, `not_ready` |
+
+API-key create/role request bodies are limited to 16 KiB; an oversized or malformed key-management JSON body currently returns `400 invalid_json`. Error messages do not contain API keys, hashes, passwords, record contents, or database connection details. All documented responses include `X-Request-ID`.
