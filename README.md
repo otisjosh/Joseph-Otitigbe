@@ -39,7 +39,7 @@ Use `sslmode=disable` only for trusted local PostgreSQL. Require TLS for deploye
 
 Atlas applies its pending forward migrations transactionally during startup. A PostgreSQL advisory transaction lock serializes concurrent startup migration attempts, and applied versions are recorded in `atlas_schema_migrations`. The `provision-key` command uses the same startup path. The database role must be allowed to create the migration table, application tables, indexes, and constraints. SQL files are in `internal/postgres/migrations`; the runner executes only the ordered `.up.sql` files. It never runs down migrations or automatically drops or rewrites existing tables. There is no separate migration command.
 
-Before upgrading a deployment, take and verify a database backup. Test the new image against a staging database or a restored copy first. Allow a single instance to complete startup migrations before routing traffic if the deployment process needs a controlled rollout. Keep a restorable backup available; schema downgrade is not automated.
+Before upgrading a deployment, take and verify a database backup. Test the new image against a staging database or a restored copy first. Allow a single instance to complete startup migrations before routing traffic if the deployment process needs a controlled rollout. Keep a restorable backup available; schema downgrade is not automated. The supplied migration 8 down SQL drops `expires_at` and therefore discards every configured expiry. Rolling back to application code that ignores expiry could make previously expired keys valid again. Do not run the down migration as routine rollback; coordinate a reviewed database restore or explicit policy decision before downgrading.
 
 ## Run Atlas locally
 
@@ -157,4 +157,4 @@ go vet ./...
 
 ## Security notes
 
-API keys do not currently expire automatically. The HTTP server does not terminate TLS; deploy it behind a trusted HTTPS endpoint. Store database credentials and one-time API keys using approved secret-management tools. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
+API keys may be provisioned with an optional UTC expiry. Omitted or `NULL` expiry means the key does not expire, including existing keys. Expiry is enforced during authentication and expired keys are rejected before protected handlers. Rotation is not part of this feature. The HTTP server does not terminate TLS; deploy it behind a trusted HTTPS endpoint. Store database credentials and one-time API keys using approved secret-management tools. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
