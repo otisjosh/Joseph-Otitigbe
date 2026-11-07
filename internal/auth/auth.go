@@ -214,15 +214,15 @@ func MiddlewareWithLimiter(store KeyStore, next http.Handler, limiter RequestLim
 			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
 			return
 		}
+		if limiter != nil && !limiter.AllowAPIKey(credential.ID, w) {
+			return
+		}
 		if err := store.TouchKey(r.Context(), credential.ID); errors.Is(err, ErrInvalidKey) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
 			return
 		} else if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication is temporarily unavailable")
-			return
-		}
-		if limiter != nil && !limiter.AllowAPIKey(credential.ID, w) {
 			return
 		}
 		if !hasPermission(credential.Permissions, required) {
