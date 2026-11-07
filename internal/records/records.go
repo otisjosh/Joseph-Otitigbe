@@ -125,7 +125,6 @@ func (h *Handler) createRecord(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getRecord(w http.ResponseWriter, r *http.Request) {
-	var id int
 	parsedID, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/records/"))
 	if err != nil || parsedID < 1 {
 		http.NotFound(w, r)
