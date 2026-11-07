@@ -177,7 +177,14 @@ func allowBucket[K comparable](entries map[K]bucket, key K, limit, capacity int,
 			}
 		}
 		if len(entries) >= capacity {
-			return decision{allowed: false, limit: limit, remaining: 0, reset: now.Add(time.Second), now: now}
+			earliestReset := now.Add(window)
+			for _, value := range entries {
+				candidate := value.start.Add(window)
+				if candidate.Before(earliestReset) {
+					earliestReset = candidate
+				}
+			}
+			return decision{allowed: false, limit: limit, remaining: 0, reset: earliestReset, now: now}
 		}
 		current = bucket{start: now}
 	}
