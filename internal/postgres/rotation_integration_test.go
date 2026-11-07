@@ -95,6 +95,10 @@ func TestAPIKeyRotationRejectsExpiredRevokedAndLastAdminDowngrade(t *testing.T) 
 	manager := auth.NewKeyManager(store)
 	admin, _, err := manager.Create(ctx, fmt.Sprintf("rotation-last-admin-%d", time.Now().UnixNano()), auth.RoleAdmin, nil)
 	if err != nil { t.Fatal(err) }
+	expiredAdminExpiry := time.Now().UTC().Add(time.Hour)
+	expiredAdmin, _, err := manager.CreateWithExpiry(ctx, fmt.Sprintf("rotation-expired-admin-%d", time.Now().UnixNano()), auth.RoleAdmin, &expiredAdminExpiry, nil)
+	if err != nil { t.Fatal(err) }
+	if _, err := pool.Exec(ctx, "UPDATE atlas_api_keys SET expires_at = $1 WHERE id = $2", time.Now().UTC().Add(-time.Minute), expiredAdmin.ID); err != nil { t.Fatal(err) }
 
 	_, _, err := manager.Create(ctx, fmt.Sprintf("rotation-writer-%d", time.Now().UnixNano()), auth.RoleWriter, &admin.ID)
 	if err != nil { t.Fatal(err) }
