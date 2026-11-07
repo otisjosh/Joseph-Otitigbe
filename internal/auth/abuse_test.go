@@ -21,7 +21,7 @@ func TestProtectedEndpointAuthorizationMatrix(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	writer, writerToken, err := manager.Create(context.Background(), "matrix-writer", RoleWriter, nil)
 	if err != nil { t.Fatal(err) }
-	admin, adminToken, err := manager.Create(context.Background(), "matrix-admin", RoleAdmin, nil)
+	_, adminToken, err := manager.Create(context.Background(), "matrix-admin", RoleAdmin, nil)
 	if err != nil { t.Fatal(err) }
 
 	endpoints := []struct {
