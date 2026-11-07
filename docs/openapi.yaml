@@ -609,7 +609,10 @@ components:
       additionalProperties: false
       properties:
         role:
-          $ref: '#/components/schemas/RoleName'
+          anyOf:
+            - $ref: '#/components/schemas/RoleName'
+            - type: 'null'
+          description: Optional replacement role; omitted or null preserves the source role.
         expires_at:
           type: [string, 'null']
           format: date-time
