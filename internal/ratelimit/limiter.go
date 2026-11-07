@@ -78,14 +78,21 @@ type bucket struct {
 	count int
 }
 
+const (
+	maxConcurrentHealthRequests    = 16
+	maxConcurrentReadinessRequests = 2
+)
+
 type Limiter struct {
-	config Config
-	mu     sync.Mutex
-	keys   map[int64]bucket
-	ips    map[string]bucket
-	nextSweep time.Time
-	now    func() time.Time
-	inFlight chan struct{}
+	config       Config
+	mu           sync.Mutex
+	keys         map[int64]bucket
+	ips          map[string]bucket
+	nextSweep    time.Time
+	now          func() time.Time
+	inFlight     chan struct{}
+	healthChecks chan struct{}
+	readyChecks  chan struct{}
 }
 
 func New(config Config) (*Limiter, error) {
@@ -108,8 +115,10 @@ func New(config Config) (*Limiter, error) {
 		config:   config,
 		keys:     make(map[int64]bucket),
 		ips:      make(map[string]bucket),
-		now:      time.Now,
-		inFlight: make(chan struct{}, config.MaxConcurrentRequests),
+		now:          time.Now,
+		inFlight:     make(chan struct{}, config.MaxConcurrentRequests),
+		healthChecks: make(chan struct{}, maxConcurrentHealthRequests),
+		readyChecks:  make(chan struct{}, maxConcurrentReadinessRequests),
 	}, nil
 }
 
@@ -276,17 +285,39 @@ func writeLimited(w http.ResponseWriter, d decision) {
 
 func (l *Limiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case l.inFlight <- struct{}{}:
-			defer func() { <-l.inFlight }()
-			next.ServeHTTP(w, r)
+		switch r.URL.Path {
+		case "/healthz":
+			serveWithReservedCapacity(w, r, next, l.healthChecks, "health_unavailable", "health endpoint is temporarily unavailable")
+		case "/readyz":
+			serveWithReservedCapacity(w, r, next, l.readyChecks, "not_ready", "service is temporarily unavailable")
 		default:
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Retry-After", "1")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{
-				"code": "rate_limited", "message": "request rate limit exceeded",
-			}})
+			select {
+			case l.inFlight <- struct{}{}:
+				defer func() { <-l.inFlight }()
+				next.ServeHTTP(w, r)
+			default:
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{
+					"code": "rate_limited", "message": "request rate limit exceeded",
+				}})
+			}
 		}
 	})
+}
+
+func serveWithReservedCapacity(w http.ResponseWriter, r *http.Request, next http.Handler, slots chan struct{}, code, message string) {
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+		next.ServeHTTP(w, r)
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{
+			"code": code, "message": message,
+		}})
+	}
 }
