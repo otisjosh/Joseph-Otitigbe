@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -50,6 +51,20 @@ func (s *memoryKeyStore) CreateKey(_ context.Context, name string, role Role, pu
 		}
 	}
 	s.credentials[publicID] = Credential{ID: metadata.ID, PublicID: publicID, Hash: append([]byte(nil), hash...), Role: role, Permissions: permissions}
+	return metadata, nil
+}
+
+func (s *memoryKeyStore) CreateKeyWithExpiry(ctx context.Context, name string, role Role, publicID string, hash []byte, expiresAt *time.Time, actor *int64) (KeyMetadata, error) {
+	metadata, err := s.CreateKey(ctx, name, role, publicID, hash, actor)
+	if err != nil { return KeyMetadata{}, err }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value := expiresAt.UTC()
+	metadata.ExpiresAt = &value
+	s.metadata[metadata.ID] = metadata
+	credential := s.credentials[publicID]
+	credential.ExpiresAt = &value
+	s.credentials[publicID] = credential
 	return metadata, nil
 }
 
@@ -300,5 +315,75 @@ func TestAdminHandlerProvisioningResponseNeverListsSecretsOrHashes(t *testing.T)
 	handler.ServeHTTP(deleteRes, deleteReq)
 	if deleteRes.Code != http.StatusOK || !strings.Contains(deleteRes.Body.String(), `"revoked_at"`) {
 		t.Fatalf("revoke response = %d %q", deleteRes.Code, deleteRes.Body.String())
+	}
+}
+
+
+func TestMiddlewareEnforcesExpiryBoundaryAndNullExpiry(t *testing.T) {
+	now := time.Date(2032, 4, 5, 6, 7, 8, 0, time.UTC)
+	cases := []struct {
+		name string
+		expiry *time.Time
+		revoked bool
+		want int
+	}{
+		{name: "non-expiring existing key", want: http.StatusNoContent},
+		{name: "not expired", expiry: ptrTime(now.Add(time.Nanosecond)), want: http.StatusNoContent},
+		{name: "future expiry", expiry: ptrTime(now.Add(time.Second)), want: http.StatusNoContent},
+		{name: "expiry reached", expiry: ptrTime(now), want: http.StatusUnauthorized},
+		{name: "expired in past", expiry: ptrTime(now.Add(-time.Second)), want: http.StatusUnauthorized},
+		{name: "revoked and expired", expiry: ptrTime(now.Add(-time.Second)), revoked: true, want: http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMemoryKeyStore()
+			manager := NewKeyManager(store)
+			metadata, token, err := manager.Create(context.Background(), "expiry-test", RoleReader, nil)
+			if err != nil { t.Fatal(err) }
+			publicID, _, ok := parseToken(token)
+			if !ok { t.Fatal("generated token did not parse") }
+			store.mu.Lock()
+			credential := store.credentials[publicID]
+			credential.ExpiresAt = tc.expiry
+			store.credentials[publicID] = credential
+			meta := store.metadata[metadata.ID]
+			meta.ExpiresAt = tc.expiry
+			store.metadata[metadata.ID] = meta
+			store.mu.Unlock()
+			if tc.revoked {
+				if _, err := manager.Revoke(context.Background(), metadata.ID, nil); err != nil { t.Fatal(err) }
+			}
+			calls := 0
+			handler := middlewareWithClock(store, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.WriteHeader(http.StatusNoContent)
+			}), nil, func() time.Time { return now })
+			req := httptest.NewRequest(http.MethodGet, "/records/1", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != tc.want { t.Fatalf("status=%d want=%d body=%s", res.Code, tc.want, res.Body) }
+			if (tc.want == http.StatusNoContent) != (calls == 1) { t.Fatalf("protected handler calls=%d", calls) }
+		})
+	}
+}
+
+func ptrTime(value time.Time) *time.Time { return &value }
+
+func TestKeyManagerRejectsNonFutureExpiryAndUsesUTC(t *testing.T) {
+	store := newMemoryKeyStore()
+	manager := NewKeyManager(store)
+	now := time.Date(2034, 1, 2, 3, 4, 5, 0, time.UTC)
+	manager.now = func() time.Time { return now }
+	for _, expiry := range []time.Time{now, now.Add(-time.Second)} {
+		if _, _, err := manager.CreateWithExpiry(context.Background(), "bad-expiry", RoleReader, &expiry, nil); !errors.Is(err, ErrInvalidExpiry) {
+			t.Fatalf("CreateWithExpiry(%s) error=%v want ErrInvalidExpiry", expiry, err)
+		}
+	}
+	future := now.Add(time.Hour).In(time.FixedZone("offset", -7*60*60))
+	metadata, _, err := manager.CreateWithExpiry(context.Background(), "future-expiry", RoleReader, &future, nil)
+	if err != nil { t.Fatal(err) }
+	if metadata.ExpiresAt == nil || metadata.ExpiresAt.Location() != time.UTC || !metadata.ExpiresAt.Equal(future) {
+		t.Fatalf("expiry metadata not normalized to UTC: %+v", metadata.ExpiresAt)
 	}
 }

@@ -67,7 +67,7 @@ Retrieve the record using `GET /records/{id}` (requires `records:read`). IDs mus
 All key and role-management endpoints require `keys:manage`.
 
 - `GET /api-keys` lists safe metadata, including revoked keys. It never returns API keys or stored hashes.
-- `POST /api-keys` provisions a key from `{"name":"reporting job","role":"reader"}`. The `201` response includes metadata and `api_key` once. It sets `Cache-Control: no-store` and `Pragma: no-cache`.
+- `POST /api-keys` provisions a key from `{"name":"reporting job","role":"reader"}`. An optional `expires_at` accepts an RFC 3339 timestamp; Atlas normalizes it to UTC and requires it to be strictly in the future. Omit it or send `null` for a non-expiring key. Omitted expiry preserves compatibility with existing clients and existing NULL-expiry keys remain valid. The `201` response includes metadata and `api_key` once. It sets `Cache-Control: no-store` and `Pragma: no-cache`.
 - `PATCH /api-keys/{id}/role` changes an active key's role with `{"role":"writer"}`.
 - `DELETE /api-keys/{id}` revokes an active key.
 - `GET /roles` lists the built-in roles and their permissions.
@@ -81,11 +81,12 @@ A successful key provisioning response contains safe metadata plus the one-time 
   "name": "reporting job",
   "role": "reader",
   "created_at": "2026-01-01T12:00:00Z",
+  "expires_at": null,
   "api_key": "<returned-once-value>"
 }
 ```
 
-The placeholder is illustrative; Atlas returns the actual key only once. Capture it in an approved secret manager. The last active administrator key cannot be revoked or downgraded; those operations return `409 last_admin_required`.
+The placeholder is illustrative; Atlas returns the actual key only once. Capture it in an approved secret manager. Key list, creation, role-change, and revocation responses include `expires_at` as an RFC 3339 UTC timestamp or `null`. Expired keys receive the same `401 invalid_api_key` response as other invalid credentials and never reach protected handlers. An expiry equal to the current instant is expired. The last active administrator key cannot be revoked or downgraded; those operations return `409 last_admin_required`.
 
 ## Audit logs and pagination
 
@@ -129,7 +130,7 @@ Source addresses come only from the TCP connection's `RemoteAddr`. Atlas does no
 | Status | Meaning | Common codes |
 |---|---|---|
 | `400` | Invalid JSON, fields, IDs, or pagination | `invalid_json`, `invalid_record`, `invalid_record_id`, `invalid_api_key_id`, `invalid_limit`, `invalid_before_id`, `invalid_role` |
-| `401` | Missing, malformed, incorrect, or revoked API key | `authentication_required`, `invalid_api_key` |
+| `401` | Missing, malformed, incorrect, revoked, or expired API key | `authentication_required`, `invalid_api_key` |
 | `403` | Valid key lacks the required permission | `permission_denied` |
 | `404` | Record or active API key does not exist | `not_found`, `api_key_not_found` |
 | `405` | Method is unsupported; response includes an `Allow` header | `method_not_allowed` |

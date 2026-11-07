@@ -34,6 +34,7 @@ var (
 	ErrKeyNotFound             = errors.New("API key not found")
 	ErrInvalidRole             = errors.New("invalid role")
 	ErrInvalidKeyName          = errors.New("invalid API key name")
+	ErrInvalidExpiry           = errors.New("API key expiry must be in the future")
 	ErrKeyStorageUnavailable   = errors.New("API key storage unavailable")
 	ErrLastAdmin             = errors.New("cannot remove the last active administrator")
 )
@@ -58,6 +59,7 @@ type KeyMetadata struct {
 	LastUsedAt         *time.Time `json:"last_used_at,omitempty"`
 	RoleChangedAt      *time.Time `json:"role_changed_at,omitempty"`
 	RoleChangedByKeyID *int64     `json:"role_changed_by_key_id,omitempty"`
+	ExpiresAt          *time.Time `json:"expires_at"`
 }
 
 // Credential is internal authentication data. Hash must never be serialized or returned by an API.
@@ -67,6 +69,11 @@ type Credential struct {
 	Hash        []byte `json:"-"`
 	Role        Role
 	Permissions []Permission
+	ExpiresAt   *time.Time `json:"-"`
+}
+
+type ExpiringKeyStore interface {
+	CreateKeyWithExpiry(ctx context.Context, name string, role Role, publicID string, hash []byte, expiresAt *time.Time, createdBy *int64) (KeyMetadata, error)
 }
 
 type KeyStore interface {
@@ -82,19 +89,31 @@ type KeyStore interface {
 type KeyManager struct {
 	store  KeyStore
 	random io.Reader
+	now    func() time.Time
 }
 
 func NewKeyManager(store KeyStore) *KeyManager {
-	return &KeyManager{store: store, random: rand.Reader}
+	return &KeyManager{store: store, random: rand.Reader, now: time.Now}
 }
 
 func (m *KeyManager) Create(ctx context.Context, name string, role Role, actor *int64) (KeyMetadata, string, error) {
+	return m.CreateWithExpiry(ctx, name, role, nil, actor)
+}
+
+func (m *KeyManager) CreateWithExpiry(ctx context.Context, name string, role Role, expiresAt *time.Time, actor *int64) (KeyMetadata, string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 100 {
 		return KeyMetadata{}, "", ErrInvalidKeyName
 	}
 	if !ValidRole(role) {
 		return KeyMetadata{}, "", ErrInvalidRole
+	}
+	if expiresAt != nil {
+		expiry := expiresAt.UTC()
+		if !m.now().UTC().Before(expiry) {
+			return KeyMetadata{}, "", ErrInvalidExpiry
+		}
+		expiresAt = &expiry
 	}
 	publicBytes := make([]byte, 16)
 	secret := make([]byte, 32)
@@ -109,7 +128,15 @@ func (m *KeyManager) Create(ctx context.Context, name string, role Role, actor *
 	publicID := base64.RawURLEncoding.EncodeToString(publicBytes)
 	token := apiKeyPrefix + publicID + "." + base64.RawURLEncoding.EncodeToString(secret)
 	hash := sha256.Sum256(secret)
-	metadata, err := m.store.CreateKey(ctx, name, role, publicID, hash[:], actor)
+	var metadata KeyMetadata
+	var err error
+	if expiresAt == nil {
+		metadata, err = m.store.CreateKey(ctx, name, role, publicID, hash[:], actor)
+	} else if store, ok := m.store.(ExpiringKeyStore); ok {
+		metadata, err = store.CreateKeyWithExpiry(ctx, name, role, publicID, hash[:], expiresAt, actor)
+	} else {
+		return KeyMetadata{}, "", ErrKeyStorageUnavailable
+	}
 	if err != nil {
 		return KeyMetadata{}, "", err
 	}
@@ -166,6 +193,10 @@ func Middleware(store KeyStore, next http.Handler) http.Handler {
 }
 
 func MiddlewareWithLimiter(store KeyStore, next http.Handler, limiter RequestLimiter) http.Handler {
+	return middlewareWithClock(store, next, limiter, time.Now)
+}
+
+func middlewareWithClock(store KeyStore, next http.Handler, limiter RequestLimiter, now func() time.Time) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
@@ -214,6 +245,11 @@ func MiddlewareWithLimiter(store KeyStore, next http.Handler, limiter RequestLim
 			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
 			return
 		}
+		if credential.ExpiresAt != nil && !now().UTC().Before(credential.ExpiresAt.UTC()) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
+			return
+		}
 		if limiter != nil && !limiter.AllowAPIKey(credential.ID, w) {
 			return
 		}
@@ -223,6 +259,11 @@ func MiddlewareWithLimiter(store KeyStore, next http.Handler, limiter RequestLim
 			return
 		} else if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication is temporarily unavailable")
+			return
+		}
+		if credential.ExpiresAt != nil && !now().UTC().Before(credential.ExpiresAt.UTC()) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
 			return
 		}
 		if !hasPermission(credential.Permissions, required) {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type KeyHandler struct {
@@ -61,6 +62,7 @@ func (h *KeyHandler) createKey(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Name string `json:"name"`
 		Role Role   `json:"role"`
+		ExpiresAt *time.Time `json:"expires_at"`
 	}
 	if err := decoder.Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body must contain a valid key name and role")
@@ -77,7 +79,7 @@ func (h *KeyHandler) createKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := principal.KeyID
-	metadata, token, err := h.manager.Create(r.Context(), input.Name, input.Role, &actor)
+	metadata, token, err := h.manager.CreateWithExpiry(r.Context(), input.Name, input.Role, input.ExpiresAt, &actor)
 	if err != nil {
 		writeManagerError(w, err, "unable to create API key")
 		return
@@ -146,6 +148,8 @@ func writeManagerError(w http.ResponseWriter, err error, fallback string) {
 	switch {
 	case errors.Is(err, ErrInvalidRole):
 		writeError(w, http.StatusBadRequest, "invalid_role", "role must be reader, writer, or admin")
+	case errors.Is(err, ErrInvalidExpiry):
+		writeError(w, http.StatusBadRequest, "invalid_expiry", "expires_at must be a future timestamp")
 	case errors.Is(err, ErrInvalidKeyName):
 		writeError(w, http.StatusBadRequest, "invalid_key_name", "key name must be between 1 and 100 characters")
 	case errors.Is(err, ErrLastAdmin):
