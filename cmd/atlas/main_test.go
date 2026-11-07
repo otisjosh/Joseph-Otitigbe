@@ -1,9 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/otisjosh/Joseph-Otitigbe/internal/postgres"
 )
 
 func TestNewServerSetsTimeoutsAndHeaderLimit(t *testing.T) {
@@ -22,5 +29,41 @@ func TestNewServerSetsTimeoutsAndHeaderLimit(t *testing.T) {
 	}
 	if server.MaxHeaderBytes != 1<<20 {
 		t.Errorf("MaxHeaderBytes = %d, want %d", server.MaxHeaderBytes, 1<<20)
+	}
+}
+
+type failingPinger struct{}
+func (failingPinger) Ping(context.Context) error { return errors.New("database URL contains password") }
+
+func TestRoutesKeepHealthLightweightAndReadyzSafe(t *testing.T) {
+	handler := routes(postgres.NewKeyStore(nil), postgres.NewStore(nil), failingPinger{}, newJSONLogger(io.Discard))
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK || health.Body.Len() != 0 {
+		t.Fatalf("health response = %d %q, want empty 200", health.Code, health.Body.String())
+	}
+	ready := httptest.NewRecorder()
+	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if ready.Code != http.StatusServiceUnavailable || ready.Body.String() != "{\"error\":{\"code\":\"not_ready\",\"message\":\"service is temporarily unavailable\"}}\n" {
+		t.Fatalf("ready response = %d %q, want safe 503 JSON", ready.Code, ready.Body.String())
+	}
+	if bytes.Contains(ready.Body.Bytes(), []byte("password")) {
+		t.Fatal("readiness response exposed database error details")
+	}
+}
+
+func TestSafeHTTPErrorWriterDoesNotLogDiagnosticContents(t *testing.T) {
+	var output bytes.Buffer
+	logger := newJSONLogger(&output)
+	writer := safeHTTPErrorWriter{logger: logger}
+	message := []byte("panic: Authorization: Bearer highly-sensitive-token")
+	if _, err := writer.Write(message); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if !bytes.Contains(output.Bytes(), []byte("http_server_internal_error")) {
+		t.Fatalf("safe error event missing: %s", output.String())
+	}
+	if bytes.Contains(output.Bytes(), []byte("highly-sensitive-token")) || bytes.Contains(output.Bytes(), []byte("Authorization")) {
+		t.Fatalf("HTTP diagnostic contents leaked: %s", output.String())
 	}
 }

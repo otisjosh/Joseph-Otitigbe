@@ -29,10 +29,13 @@ Start the API:
 go run ./cmd/atlas
 ```
 
-Atlas checks the database connection and applies pending versioned migrations before serving requests. On SIGINT or SIGTERM, it drains active HTTP requests before closing the PostgreSQL pool.
+Atlas checks the database connection and applies pending versioned migrations before serving requests. It emits structured JSON logs to stderr using `log/slog`; each HTTP log contains only method, route template, status, duration, and a generated request ID. Raw paths, query strings, headers, request bodies, API keys, database credentials, and record contents are excluded. On SIGINT or SIGTERM, it drains active HTTP requests before closing the PostgreSQL pool.
+
+## Operational endpoints
+`GET /healthz` is a lightweight liveness check and does not query PostgreSQL. `GET /readyz` performs a PostgreSQL ping with a two-second timeout and returns `503` with a safe JSON error when the database is unavailable. Both endpoints are public for deployment probes. Every request receives a fresh generated `X-Request-ID` response header; caller-supplied IDs are not trusted.
 
 ## Authentication and roles
-All endpoints except `GET /healthz` require an API key in `Authorization: Bearer <api_key>`.
+`GET /healthz` and `GET /readyz` are public and do not require an API key. All other endpoints require an API key in `Authorization: Bearer <api_key>`.
 
 | Role | Permissions |
 |---|---|

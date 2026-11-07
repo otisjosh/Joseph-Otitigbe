@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
+	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,9 +18,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/audit"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/auth"
+	"github.com/otisjosh/Joseph-Otitigbe/internal/observability"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/postgres"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/records"
 )
+
+func newJSONLogger(output io.Writer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
+type safeHTTPErrorWriter struct {
+	logger *slog.Logger
+}
+
+func (w safeHTTPErrorWriter) Write(message []byte) (int, error) {
+	w.logger.Error("http_server_internal_error")
+	return len(message), nil
+}
 
 func newServer(addr string, handler http.Handler) *http.Server {
 	return &http.Server{
@@ -45,19 +60,20 @@ func openDatabase(ctx context.Context) (*postgres.KeyStore, *postgres.Store, *pg
 	return postgres.NewKeyStore(pool), postgres.NewStore(pool), pool, nil
 }
 
-func routes(keyStore *postgres.KeyStore, recordStore *postgres.Store) http.Handler {
+func routes(keyStore *postgres.KeyStore, recordStore *postgres.Store, pinger observability.Pinger, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	recordHandler := records.NewHandler(recordStore)
 	keyHandler := auth.NewKeyHandler(auth.NewKeyManager(keyStore))
 	auditHandler := audit.NewHandler(keyStore.AuditStore())
 	mux.Handle("/healthz", recordHandler)
+	mux.Handle("/readyz", observability.NewReadinessHandler(pinger, 2*time.Second))
 	mux.Handle("/records", recordHandler)
 	mux.Handle("/records/", recordHandler)
 	mux.Handle("/api-keys", keyHandler)
 	mux.Handle("/api-keys/", keyHandler)
 	mux.Handle("/roles", keyHandler)
 	mux.Handle("/audit-logs", auditHandler)
-	return auth.Middleware(keyStore, mux)
+	return observability.RequestLogging(logger, auth.Middleware(keyStore, mux))
 }
 
 func runServer() error {
@@ -73,13 +89,15 @@ func runServer() error {
 	if addr == "" {
 		addr = ":8080"
 	}
-	server := newServer(addr, routes(keyStore, recordStore))
+	logger := newJSONLogger(os.Stderr)
+	server := newServer(addr, routes(keyStore, recordStore, closer, logger))
+	server.ErrorLog = log.New(safeHTTPErrorWriter{logger: logger}, "", 0)
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		log.Printf("Atlas API listening on %s", addr)
+		logger.Info("server_started")
 		serverErrors <- server.ListenAndServe()
 	}()
 
@@ -106,6 +124,7 @@ func runServer() error {
 
 func provisionKey(args []string) error {
 	flags := flag.NewFlagSet("provision-key", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
 	name := flags.String("name", "", "human-readable API key name")
 	role := flags.String("role", "", "role: reader, writer, or admin")
 	if err := flags.Parse(args); err != nil {
@@ -139,12 +158,13 @@ func provisionKey(args []string) error {
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "provision-key" {
 		if err := provisionKey(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			newJSONLogger(os.Stderr).Error("provision_key_failed")
 			os.Exit(1)
 		}
 		return
 	}
 	if err := runServer(); err != nil {
-		log.Fatal(err)
+		newJSONLogger(os.Stderr).Error("server_failed")
+		os.Exit(1)
 	}
 }

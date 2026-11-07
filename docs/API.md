@@ -5,9 +5,12 @@ All responses use JSON except the empty `GET /healthz` response. Error responses
 {"error":{"code":"permission_denied","message":"the API key does not have permission for this operation"}}
 ```
 
+## Request IDs and logging
+Every request receives a new random request ID in the `X-Request-ID` response header. Atlas does not trust or reuse caller-supplied request IDs. Structured JSON logs are written to stderr and include method, route template, response status, duration in milliseconds, and request ID. Raw URL paths and query strings, headers, request bodies, API keys, database credentials, passwords, and record fields are not logged.
+
 ## Authentication
 
-Send an API key on every route except `GET /healthz`:
+`GET /healthz` and `GET /readyz` are public and do not require an API key. Send an API key on all other routes:
 ```http
 Authorization: Bearer atlas_<public-id>.<secret>
 ```
@@ -26,7 +29,8 @@ API keys have a random public selector and a 256-bit random secret. Only the SHA
 
 ### Public health
 
-- `GET /healthz` — liveness response; no API key required.
+- `GET /healthz` — lightweight liveness response; no API key required and no database query is made.
+- `GET /readyz` — checks PostgreSQL with a two-second bounded timeout; returns `200` when ready or a safe `503` JSON error. No database details are included; no API key required.
 
 ### Records
 
