@@ -23,6 +23,7 @@ import (
 	"github.com/otisjosh/Joseph-Otitigbe/internal/observability"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/postgres"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/records"
+	"github.com/otisjosh/Joseph-Otitigbe/internal/ratelimit"
 )
 
 func newJSONLogger(output io.Writer) *slog.Logger {
@@ -91,7 +92,7 @@ func openDatabaseURL(ctx context.Context, databaseURL string) (*postgres.KeyStor
 	return postgres.NewKeyStore(pool), postgres.NewStore(pool), pool, nil
 }
 
-func routes(keyStore *postgres.KeyStore, recordStore *postgres.Store, pinger observability.Pinger, logger *slog.Logger) http.Handler {
+func routes(keyStore *postgres.KeyStore, recordStore *postgres.Store, pinger observability.Pinger, logger *slog.Logger, limiters ...*ratelimit.Limiter) http.Handler {
 	mux := http.NewServeMux()
 	recordHandler := records.NewHandler(recordStore)
 	keyHandler := auth.NewKeyHandler(auth.NewKeyManager(keyStore))
@@ -104,7 +105,15 @@ func routes(keyStore *postgres.KeyStore, recordStore *postgres.Store, pinger obs
 	mux.Handle("/api-keys/", keyHandler)
 	mux.Handle("/roles", keyHandler)
 	mux.Handle("/audit-logs", auditHandler)
-	return observability.RequestLogging(logger, auth.Middleware(keyStore, mux))
+	var limiter *ratelimit.Limiter
+	if len(limiters) > 0 {
+		limiter = limiters[0]
+	}
+	handler := auth.MiddlewareWithLimiter(keyStore, mux, limiter)
+	if limiter != nil {
+		handler = limiter.Middleware(handler)
+	}
+	return observability.RequestLogging(logger, handler)
 }
 
 func runServer() error {
@@ -113,6 +122,14 @@ func runServer() error {
 		return err
 	}
 	addr, err := loadListenAddress(os.Getenv)
+	if err != nil {
+		return err
+	}
+	limitConfig, err := ratelimit.LoadConfig(os.Getenv)
+	if err != nil {
+		return err
+	}
+	limiter, err := ratelimit.New(limitConfig)
 	if err != nil {
 		return err
 	}
@@ -131,7 +148,7 @@ func runServer() error {
 	}
 
 	logger := newJSONLogger(os.Stderr)
-	server := newServer(addr, routes(keyStore, recordStore, closer, logger))
+	server := newServer(addr, routes(keyStore, recordStore, closer, logger, limiter))
 	server.ErrorLog = log.New(safeHTTPErrorWriter{logger: logger}, "", 0)
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -211,7 +228,13 @@ func main() {
 		return
 	}
 	if err := runServer(); err != nil {
-		newJSONLogger(os.Stderr).Error("server_failed")
+		logger := newJSONLogger(os.Stderr)
+		var configErr ratelimit.ConfigError
+		if errors.As(err, &configErr) {
+			logger.Error("server_configuration_invalid", slog.String("reason", configErr.Error()))
+		} else {
+			logger.Error("server_failed")
+		}
 		os.Exit(1)
 	}
 }
