@@ -4,3 +4,4 @@ rules:
   no-invalid-media-type-examples: error
   no-invalid-parameter-examples: error
   no-invalid-schema-examples: error
+  no-server-example.com: off
