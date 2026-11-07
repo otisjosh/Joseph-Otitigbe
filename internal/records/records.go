@@ -5,10 +5,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/mail"
 	"strconv"
 	"strings"
 	"sync"
 )
+
+const maxRequestBody = 1 << 20
 
 var (
 	ErrInvalidRecord = errors.New("name and a valid email are required")
@@ -37,8 +40,32 @@ func normalizeEmail(email string) string {
 }
 
 func validEmail(email string) bool {
-	at := strings.IndexByte(email, '@')
-	return at > 0 && at < len(email)-1 && !strings.ContainsAny(email, " \t\r\n")
+	if len(email) > 254 {
+		return false
+	}
+	address, err := mail.ParseAddress(email)
+	if err != nil || address.Address != email {
+		return false
+	}
+	at := strings.LastIndexByte(email, '@')
+	if at <= 0 || at == len(email)-1 {
+		return false
+	}
+	domain := email[at+1:]
+	if !strings.Contains(domain, ".") || strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
+		return false
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if label == "" || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *Store) Create(name, email string) (Record, error) {
@@ -78,21 +105,56 @@ func NewHandler() http.Handler {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
-	case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+	case r.URL.Path == "/healthz":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
-	case r.URL.Path == "/records" && r.Method == http.MethodPost:
+	case r.URL.Path == "/records":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
 		h.createRecord(w, r)
-	case strings.HasPrefix(r.URL.Path, "/records/") && r.Method == http.MethodGet:
+	case strings.HasPrefix(r.URL.Path, "/records/"):
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
 		h.getRecord(w, r)
-	case r.URL.Path == "/records" || strings.HasPrefix(r.URL.Path, "/records/"):
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
-		http.NotFound(w, r)
+		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
 }
 
+func methodNotAllowed(w http.ResponseWriter, allowed string) {
+	w.Header().Set("Allow", allowed)
+	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+}
+
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}{Error: struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}{Code: code, Message: message}})
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
 func (h *Handler) createRecord(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	var input struct {
@@ -100,41 +162,44 @@ func (h *Handler) createRecord(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 	}
 	if err := decoder.Decode(&input); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the 1 MiB limit")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be a valid record object")
+		}
 		return
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
-		http.Error(w, "request must contain one JSON object", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_json", "request must contain exactly one JSON object")
 		return
 	}
 
 	record, err := h.store.Create(input.Name, input.Email)
 	switch {
 	case errors.Is(err, ErrInvalidRecord):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_record", err.Error())
 	case errors.Is(err, ErrDuplicate):
-		http.Error(w, err.Error(), http.StatusConflict)
+		writeError(w, http.StatusConflict, "duplicate_record", err.Error())
 	case err != nil:
-		http.Error(w, "unable to create record", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "unable to create record")
 	default:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(record)
+		writeJSON(w, http.StatusCreated, record)
 	}
 }
 
 func (h *Handler) getRecord(w http.ResponseWriter, r *http.Request) {
-	parsedID, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/records/"))
-	if err != nil || parsedID < 1 {
-		http.NotFound(w, r)
+	rawID := strings.TrimPrefix(r.URL.Path, "/records/")
+	id, err := strconv.Atoi(rawID)
+	if err != nil || id < 1 || strconv.Itoa(id) != rawID {
+		writeError(w, http.StatusBadRequest, "invalid_record_id", "record ID must be a positive integer")
 		return
 	}
-	record, ok := h.store.Get(parsedID)
+	record, ok := h.store.Get(id)
 	if !ok {
-		http.NotFound(w, r)
+		writeError(w, http.StatusNotFound, "not_found", "record not found")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(record)
+	writeJSON(w, http.StatusOK, record)
 }
