@@ -1,0 +1,1 @@
+ALTER TABLE atlas_api_keys ADD COLUMN expires_at timestamptz;
