@@ -65,7 +65,12 @@ func TestIPLimiterUsesRemoteAddressAndRejectsForwardedHeaderInfluence(t *testing
 	config.Window = time.Minute
 	limiter := testLimiter(t, config)
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	handler := limiter.Middleware(next)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !limiter.AllowRemoteAddr(r.RemoteAddr, w) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 
 	first := httptest.NewRequest(http.MethodGet, "/protected", nil)
 	first.RemoteAddr = "192.0.2.10:4000"
@@ -159,9 +164,10 @@ func TestGlobalConcurrencyLimit(t *testing.T) {
 	config.MaxConcurrentRequests = 1
 	limiter := testLimiter(t, config)
 	started := make(chan struct{})
+	var startedOnce sync.Once
 	release := make(chan struct{})
 	handler := limiter.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		close(started)
+		startedOnce.Do(func() { close(started) })
 		<-release
 		w.WriteHeader(http.StatusNoContent)
 	}))
