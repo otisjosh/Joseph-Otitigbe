@@ -5,17 +5,16 @@ import (
 	"context"
 	"errors"
 	"io"
-	"strings"
-	"sync"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/otisjosh/Joseph-Otitigbe/internal/postgres"
 )
-
 
 func TestLoadDatabaseURLValidatesWithoutExposingInput(t *testing.T) {
 	values := map[string]string{"DATABASE_URL": "not a postgres URL"}
