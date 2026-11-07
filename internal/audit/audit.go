@@ -21,6 +21,8 @@ type Event struct {
 	ResourceType string `json:"resource_type"`
 	ResourceID *int64 `json:"resource_id,omitempty"`
 	Details map[string]string `json:"details"`
+	RequestID string `json:"request_id,omitempty"`
+	Outcome string `json:"outcome,omitempty"`
 }
 
 type Store interface {
