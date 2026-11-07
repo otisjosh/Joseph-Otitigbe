@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/otisjosh/Joseph-Otitigbe/internal/observability"
 )
 
 type Role string
@@ -231,15 +233,33 @@ type RequestLimiter interface {
 	AllowAPIKey(id int64, w http.ResponseWriter) bool
 }
 
+// AuthenticationAuditor records bounded authentication outcomes. identity is used
+// only by its in-memory sampling gate and must never be persisted.
+type AuthenticationAuditor interface {
+	RecordAuthentication(ctx context.Context, outcome, reason, requestID string, actorKeyID *int64, identity string) error
+}
+
 func Middleware(store KeyStore, next http.Handler) http.Handler {
-	return MiddlewareWithLimiter(store, next, nil)
+	return MiddlewareWithLimiterAndAuditor(store, next, nil, nil)
 }
 
 func MiddlewareWithLimiter(store KeyStore, next http.Handler, limiter RequestLimiter) http.Handler {
-	return middlewareWithClock(store, next, limiter, time.Now)
+	return MiddlewareWithLimiterAndAuditor(store, next, limiter, nil)
+}
+
+func MiddlewareWithAuditor(store KeyStore, next http.Handler, auditor AuthenticationAuditor) http.Handler {
+	return MiddlewareWithLimiterAndAuditor(store, next, nil, auditor)
+}
+
+func MiddlewareWithLimiterAndAuditor(store KeyStore, next http.Handler, limiter RequestLimiter, auditor AuthenticationAuditor) http.Handler {
+	return middlewareWithClockAndAuditor(store, next, limiter, auditor, time.Now)
 }
 
 func middlewareWithClock(store KeyStore, next http.Handler, limiter RequestLimiter, now func() time.Time) http.Handler {
+	return middlewareWithClockAndAuditor(store, next, limiter, nil, now)
+}
+
+func middlewareWithClockAndAuditor(store KeyStore, next http.Handler, limiter RequestLimiter, auditor AuthenticationAuditor, now func() time.Time) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
@@ -253,30 +273,49 @@ func middlewareWithClock(store KeyStore, next http.Handler, limiter RequestLimit
 		if limiter != nil && !limiter.AllowRemoteAddr(r.RemoteAddr, w) {
 			return
 		}
+		recordAuth := func(outcome, reason string, actorKeyID *int64) bool {
+			if auditor == nil {
+				return true
+			}
+			requestID, _ := observability.RequestIDFromContext(r.Context())
+			identity := "source:" + r.RemoteAddr
+			if actorKeyID != nil {
+				identity = fmt.Sprintf("key:%d", *actorKeyID)
+			}
+			if err := auditor.RecordAuthentication(r.Context(), outcome, reason, requestID, actorKeyID, identity); err != nil {
+				writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication is temporarily unavailable")
+				return false
+			}
+			return true
+		}
+		unauthorized := func(code, message, reason string) {
+			if !recordAuth("failure", reason, nil) {
+				return
+			}
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(w, http.StatusUnauthorized, code, message)
+		}
+
 		header := r.Header.Get("Authorization")
 		if header == "" {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "authentication_required", "a bearer API key is required")
+			unauthorized("authentication_required", "a bearer API key is required", "missing_authorization")
 			return
 		}
 		token, ok := bearerToken(header)
 		if !ok {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
+			unauthorized("invalid_api_key", "the bearer API key is invalid", "invalid_authorization")
 			return
 		}
 		publicID, secret, ok := parseToken(token)
 		if !ok {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
+			unauthorized("invalid_api_key", "the bearer API key is invalid", "invalid_credential")
 			return
 		}
 		defer clear(secret)
 		hash := sha256.Sum256(secret)
 		credential, err := store.LookupKey(r.Context(), publicID)
 		if errors.Is(err, ErrInvalidKey) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
+			unauthorized("invalid_api_key", "the bearer API key is invalid", "invalid_credential")
 			return
 		}
 		if err != nil {
@@ -284,29 +323,28 @@ func middlewareWithClock(store KeyStore, next http.Handler, limiter RequestLimit
 			return
 		}
 		if len(credential.Hash) != len(hash) || subtle.ConstantTimeCompare(credential.Hash, hash[:]) != 1 {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
+			unauthorized("invalid_api_key", "the bearer API key is invalid", "invalid_credential")
 			return
 		}
 		if credential.ExpiresAt != nil && !now().UTC().Before(credential.ExpiresAt.UTC()) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
+			unauthorized("invalid_api_key", "the bearer API key is invalid", "invalid_credential")
 			return
 		}
 		if limiter != nil && !limiter.AllowAPIKey(credential.ID, w) {
 			return
 		}
 		if err := store.TouchKey(r.Context(), credential.ID); errors.Is(err, ErrInvalidKey) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
+			unauthorized("invalid_api_key", "the bearer API key is invalid", "invalid_credential")
 			return
 		} else if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication is temporarily unavailable")
 			return
 		}
 		if credential.ExpiresAt != nil && !now().UTC().Before(credential.ExpiresAt.UTC()) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
+			unauthorized("invalid_api_key", "the bearer API key is invalid", "invalid_credential")
+			return
+		}
+		if !recordAuth("success", "", &credential.ID) {
 			return
 		}
 		if !hasPermission(credential.Permissions, required) {
