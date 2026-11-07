@@ -51,3 +51,19 @@ func TestRoutesKeepHealthLightweightAndReadyzSafe(t *testing.T) {
 		t.Fatal("readiness response exposed database error details")
 	}
 }
+
+func TestSafeHTTPErrorWriterDoesNotLogDiagnosticContents(t *testing.T) {
+	var output bytes.Buffer
+	logger := newJSONLogger(&output)
+	writer := safeHTTPErrorWriter{logger: logger}
+	message := []byte("panic: Authorization: Bearer highly-sensitive-token")
+	if _, err := writer.Write(message); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if !bytes.Contains(output.Bytes(), []byte("http_server_internal_error")) {
+		t.Fatalf("safe error event missing: %s", output.String())
+	}
+	if bytes.Contains(output.Bytes(), []byte("highly-sensitive-token")) || bytes.Contains(output.Bytes(), []byte("Authorization")) {
+		t.Fatalf("HTTP diagnostic contents leaked: %s", output.String())
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,6 +25,15 @@ import (
 
 func newJSONLogger(output io.Writer) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
+type safeHTTPErrorWriter struct {
+	logger *slog.Logger
+}
+
+func (w safeHTTPErrorWriter) Write(message []byte) (int, error) {
+	w.logger.Error("http_server_internal_error")
+	return len(message), nil
 }
 
 func newServer(addr string, handler http.Handler) *http.Server {
@@ -79,13 +89,15 @@ func runServer() error {
 	if addr == "" {
 		addr = ":8080"
 	}
-	server := newServer(addr, routes(keyStore, recordStore, closer, newJSONLogger(os.Stderr)))
+	logger := newJSONLogger(os.Stderr)
+	server := newServer(addr, routes(keyStore, recordStore, closer, logger))
+	server.ErrorLog = log.New(safeHTTPErrorWriter{logger: logger}, "", 0)
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		newJSONLogger(os.Stderr).Info("server_started", "address", addr)
+		logger.Info("server_started")
 		serverErrors <- server.ListenAndServe()
 	}()
 
