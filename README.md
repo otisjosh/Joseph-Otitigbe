@@ -4,7 +4,7 @@ Atlas is a Go HTTP API for enterprise records, PostgreSQL persistence, API-key a
 
 ## Prerequisites
 
-- Go 1.25 or newer.
+- Go 1.26.10 or newer.
 - PostgreSQL 16 for the supported CI and integration-test configuration.
 - A PostgreSQL database role authorized to create Atlas tables, indexes, and migration metadata.
 
@@ -167,7 +167,7 @@ Pull requests and pushes to `main` or `feature/**` run the existing PostgreSQL 1
 - **govulncheck v1.1.4** against the Go packages. It reports vulnerabilities in dependencies that affect reachable code; a finding fails the job. Findings are reviewed and fixed or explicitly risk-assessed before merge; no vulnerability suppression file is used.
 - **Trivy v0.76.2** against the built image, scanning OS packages and application libraries. HIGH and CRITICAL findings fail CI, including findings without an available fix. Findings are reviewed, the base/dependency is updated where possible, and any accepted risk must be documented through normal review. This scan is not proof that Atlas is vulnerability-free.
 
-GitHub Actions are pinned to full upstream commit SHAs with release comments. The Go builder image is pinned to the multi-architecture index digest `sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59`. The Distroless Debian 13 nonroot runtime uses its versioned upstream tag; its registry index digest was not available for independent verification during this change, so it remains a mutable reference. Review that pin and convert it to an upstream-verified digest when registry metadata is available. Distroless publishes this image for amd64, arm64, arm, s390x, ppc64le, and riscv64; CI currently builds on GitHub-hosted amd64 runners. See the upstream [Distroless image list](https://github.com/GoogleContainerTools/distroless#what-images-are-available).
+GitHub Actions are pinned to full upstream commit SHAs with release comments. The Go builder image is `golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308`, pinned to its multi-architecture index digest. The Distroless Debian 13 nonroot runtime uses its versioned upstream tag; its registry index digest was not available for independent verification during this change, so it remains a mutable reference. Review that pin and convert it to an upstream-verified digest when registry metadata is available. Distroless publishes this image for amd64, arm64, arm, s390x, ppc64le, and riscv64; CI currently builds on GitHub-hosted amd64 runners. See the upstream [Distroless image list](https://github.com/GoogleContainerTools/distroless#what-images-are-available).
 
 ### Run scans locally
 
