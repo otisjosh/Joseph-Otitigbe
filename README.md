@@ -23,7 +23,9 @@ Use `sslmode=disable` only for trusted local PostgreSQL. Use TLS verification fo
 
 ## Database migrations
 
-Atlas applies pending versioned migrations automatically when the API starts. The `provision-key` command uses the same database startup path and applies pending migrations before provisioning. The configured database role must be allowed to create the migration tracking table, application tables, and indexes. Applied versions are tracked in `atlas_schema_migrations`; SQL migration files are under `internal/postgres/migrations`. There is no separate migration command.
+Atlas applies its pending forward migrations transactionally during startup. A PostgreSQL advisory transaction lock serializes concurrent startup migration attempts, and applied versions are recorded in `atlas_schema_migrations`. The `provision-key` command uses the same startup path. The database role must be allowed to create the migration table, application tables, indexes, and constraints. SQL files are in `internal/postgres/migrations`; the runner executes only the ordered `.up.sql` files. It never runs down migrations or automatically drops or rewrites existing tables. There is no separate migration command.
+
+Before upgrading a deployment, take and verify a database backup. Test the new image against a staging database or a restored copy first. Allow a single instance to complete startup migrations before routing traffic if the deployment process needs a controlled rollout. Keep a restorable backup available; schema downgrade is not automated.
 
 ## Run Atlas locally
 
@@ -42,6 +44,49 @@ go run ./cmd/atlas
 ```
 
 The server listens on `:8080` by default; set `ATLAS_ADDR` to change it. On SIGINT or SIGTERM, Atlas drains active HTTP requests before closing its PostgreSQL pool.
+
+## Run Atlas in Docker
+
+Build the multi-stage image from the repository root:
+
+```sh
+docker build --pull -t atlas:local .
+```
+
+The runtime image contains the statically compiled Atlas binary on a minimal Distroless base and runs as UID/GID 65532. It has no shell or package manager. Start the API with `DATABASE_URL` supplied by the host environment or your deployment's secret manager:
+
+```sh
+docker run --rm --name atlas -p 8080:8080 \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --env DATABASE_URL --env ATLAS_ADDR=0.0.0.0:8080 atlas:local
+```
+
+Do not put the database URL in the Dockerfile, image build arguments, shell history, or committed files. When PostgreSQL runs in Docker Compose, use its service name as the database host. From Docker Desktop, use the supported host gateway name when PostgreSQL runs on the host; container `localhost` refers to the Atlas container itself. Atlas starts after PostgreSQL is reachable and applies pending migrations on startup.
+
+To provision a key using the same image, run it as a one-shot command and capture stdout directly in an approved secret manager:
+
+```sh
+docker run --rm --env DATABASE_URL --entrypoint /atlas atlas:local \
+  provision-key --name initial-admin --role admin
+```
+
+Send SIGTERM for a graceful stop. Atlas drains active HTTP requests for up to 10 seconds before the database pool closes; configure the orchestrator's termination grace period to allow that interval.
+
+## Database backup and restore
+
+Use PostgreSQL 16 client tools and keep backup files in encrypted, access-controlled storage. This example creates a custom-format logical backup without ownership or ACL entries:
+
+```sh
+pg_dump --format=custom --no-owner --no-acl --file=atlas.backup "$DATABASE_URL"
+```
+
+Test restoration into a separately provisioned empty database, never over the live database:
+
+```sh
+pg_restore --dbname="$RESTORE_DATABASE_URL" --no-owner --no-acl atlas.backup
+```
+
+Do not add `--clean` or `--create` when performing a verification restore. After restoring, verify the migration table and data, then start Atlas against that restored target and check `/readyz`. Restore testing does not replace a documented recovery plan, encryption, retention, and restore drills.
 
 ## API contract and operations
 
@@ -86,6 +131,15 @@ go test -race ./...
 go test -cover ./...
 go vet ./...
 ```
+
+## Deployment troubleshooting
+
+- **Startup reports missing or invalid `DATABASE_URL`:** provide a valid PostgreSQL connection string through the runtime environment or secret manager. Atlas does not load `.env` files automatically.
+- **Startup cannot connect or migrate:** check PostgreSQL 16 is reachable from the container network, the hostname is correct, TLS settings match the server, and the database role can create the migration objects. Application logs use safe event names and do not print the connection URL or driver diagnostics.
+- **Container cannot connect to PostgreSQL on the host:** use the host gateway supported by your container runtime; `localhost` inside Atlas points to Atlas itself.
+- **`/healthz` returns 200 while `/readyz` returns 503:** the process is alive but PostgreSQL ping failed. Inspect database/network availability and credentials through your approved secret-management workflow.
+- **Port bind fails:** ensure `ATLAS_ADDR` is a valid `host:port` address and the port is available. It defaults to `:8080`.
+- **Requests are interrupted during deployment:** configure at least 10 seconds of termination grace for Atlas to drain active requests before the pool closes.
 
 ## Security notes
 
