@@ -87,7 +87,7 @@ func TestDatabaseAndMigrationFailuresAreReturned(t *testing.T) {
 	if err := RunMigrations(ctx, pool); err == nil {
 		t.Fatal("RunMigrations() on a closed pool succeeded, want a database error")
 	}
-	_, err := NewStore(pool).Create(ctx, "Atlas Failure", "failure@example.test")
+	_, err = NewStore(pool).Create(ctx, "Atlas Failure", "failure@example.test")
 	if !errors.Is(err, records.ErrUnavailable) {
 		t.Fatalf("Create() error = %v, want records.ErrUnavailable", err)
 	}
