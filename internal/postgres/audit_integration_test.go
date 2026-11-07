@@ -42,8 +42,26 @@ func TestAuditEventsCaptureMutationsWithoutSecretsOrRecordContents(t *testing.T)
 	encoded,err:=json.Marshal(events);if err!=nil{t.Fatal(err)}
 	if strings.Contains(string(encoded),token)||strings.Contains(string(encoded),email)||strings.Contains(string(encoded),"Sensitive record name"){t.Fatalf("audit events contain secret or record content: %s",encoded)}
 
-	handler:=auth.Middleware(NewKeyStore(pool),audit.NewHandler(store))
-	req:=httptest.NewRequest(http.MethodGet,"/audit-logs?limit=20",nil);req.Header.Set("Authorization","Bearer "+adminToken)
-	res:=httptest.NewRecorder();handler.ServeHTTP(res,req)
-	if res.Code!=http.StatusOK||!strings.Contains(res.Body.String(),"api_key.role_changed"){t.Fatalf("admin audit endpoint=%d %q",res.Code,res.Body.String())}
+	handler := auth.Middleware(NewKeyStore(pool), audit.NewHandler(store))
+	adminReq := httptest.NewRequest(http.MethodGet, "/audit-logs?limit=20", nil)
+	adminReq.Header.Set("Authorization", "Bearer "+adminToken)
+	adminRes := httptest.NewRecorder()
+	handler.ServeHTTP(adminRes, adminReq)
+	if adminRes.Code != http.StatusOK || !strings.Contains(adminRes.Body.String(), "api_key.role_changed") {
+		t.Fatalf("admin audit endpoint = %d %q", adminRes.Code, adminRes.Body.String())
+	}
+
+	for _, role := range []auth.Role{auth.RoleReader, auth.RoleWriter} {
+		_, restrictedToken, err := manager.Create(ctx, fmt.Sprintf("audit-%s-%d", role, time.Now().UnixNano()), role, &admin.ID)
+		if err != nil {
+			t.Fatalf("create %s key: %v", role, err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/audit-logs", nil)
+		req.Header.Set("Authorization", "Bearer "+restrictedToken)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusForbidden || !strings.Contains(res.Body.String(), "permission_denied") {
+			t.Errorf("%s GET /audit-logs = %d %q, want 403 permission_denied", role, res.Code, res.Body.String())
+		}
+	}
 }
