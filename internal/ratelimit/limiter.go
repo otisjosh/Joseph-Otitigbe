@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+type ConfigError struct {
+	message string
+}
+
+func (e ConfigError) Error() string { return e.message }
+
 type Config struct {
 	MaxConcurrentRequests int
 	RequestsPerAPIKey     int
@@ -49,7 +55,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if raw := strings.TrimSpace(getenv("ATLAS_RATE_LIMIT_WINDOW")); raw != "" {
 		window, parseErr := time.ParseDuration(raw)
 		if parseErr != nil || window < time.Second || window > 24*time.Hour {
-			return Config{}, errors.New("ATLAS_RATE_LIMIT_WINDOW must be a duration between 1s and 24h")
+			return Config{}, ConfigError{message: "ATLAS_RATE_LIMIT_WINDOW must be a duration between 1s and 24h"}
 		}
 		config.Window = window
 	}
@@ -63,7 +69,7 @@ func intSetting(getenv func(string) string, name string, fallback, min, max int)
 	}
 	value, err := strconv.Atoi(raw)
 	if err != nil || value < min || value > max {
-		return 0, fmt.Errorf("%s must be between %d and %d", name, min, max)
+		return 0, ConfigError{message: fmt.Sprintf("%s must be between %d and %d", name, min, max)}
 	}
 	return value, nil
 }
@@ -84,20 +90,20 @@ type Limiter struct {
 }
 
 func New(config Config) (*Limiter, error) {
-	if config.MaxConcurrentRequests < 1 || config.MaxConcurrentRequests > 100000 {
-		return nil, errors.New("ATLAS_MAX_CONCURRENT_REQUESTS must be between 1 and 100000")
+	if config.MaxConcurrentRequests < 1 || config.MaxConcurrentRequests > 10000 {
+		return nil, ConfigError{message: "ATLAS_MAX_CONCURRENT_REQUESTS must be between 1 and 10000"}
 	}
 	if config.RequestsPerAPIKey < 0 || config.RequestsPerAPIKey > 1000000 {
-		return nil, errors.New("ATLAS_RATE_LIMIT_PER_KEY must be between 0 and 1000000")
+		return nil, ConfigError{message: "ATLAS_RATE_LIMIT_PER_KEY must be between 0 and 1000000"}
 	}
 	if config.RequestsPerIP < 0 || config.RequestsPerIP > 1000000 {
-		return nil, errors.New("ATLAS_RATE_LIMIT_PER_IP must be between 0 and 1000000")
+		return nil, ConfigError{message: "ATLAS_RATE_LIMIT_PER_IP must be between 0 and 1000000"}
 	}
 	if config.Window < time.Second || config.Window > 24*time.Hour {
-		return nil, errors.New("ATLAS_RATE_LIMIT_WINDOW must be a duration between 1s and 24h")
+		return nil, ConfigError{message: "ATLAS_RATE_LIMIT_WINDOW must be a duration between 1s and 24h"}
 	}
-	if config.MaxClients < 1 || config.MaxClients > 1000000 {
-		return nil, errors.New("ATLAS_RATE_LIMIT_MAX_CLIENTS must be between 1 and 1000000")
+	if config.MaxClients < 1 || config.MaxClients > 100000 {
+		return nil, ConfigError{message: "ATLAS_RATE_LIMIT_MAX_CLIENTS must be between 1 and 100000"}
 	}
 	return &Limiter{
 		config:   config,
@@ -113,6 +119,7 @@ type decision struct {
 	limit     int
 	remaining int
 	reset     time.Time
+	now       time.Time
 }
 
 func (l *Limiter) AllowAPIKey(id int64, w http.ResponseWriter) bool {
@@ -164,16 +171,23 @@ func allowBucket[K comparable](entries map[K]bucket, key K, limit, capacity int,
 	}
 	if !exists {
 		if len(entries) >= capacity {
-			return decision{allowed: false, limit: limit, remaining: 0, reset: now.Add(time.Second)}
+			for existingKey, value := range entries {
+				if !now.Before(value.start.Add(window)) {
+					delete(entries, existingKey)
+				}
+			}
+		}
+		if len(entries) >= capacity {
+			return decision{allowed: false, limit: limit, remaining: 0, reset: now.Add(time.Second), now: now}
 		}
 		current = bucket{start: now}
 	}
 	if current.count >= limit {
-		return decision{allowed: false, limit: limit, remaining: 0, reset: current.start.Add(window)}
+		return decision{allowed: false, limit: limit, remaining: 0, reset: current.start.Add(window), now: now}
 	}
 	current.count++
 	entries[key] = current
-	return decision{allowed: true, limit: limit, remaining: limit - current.count, reset: current.start.Add(window)}
+	return decision{allowed: true, limit: limit, remaining: limit - current.count, reset: current.start.Add(window), now: now}
 }
 
 func (l *Limiter) sweepLocked(now time.Time) {
@@ -225,7 +239,7 @@ func writeHeaders(w http.ResponseWriter, d decision) {
 	if d.limit <= 0 {
 		return
 	}
-	reset := secondsUntil(d.reset, time.Now())
+	reset := secondsUntil(d.reset, d.now)
 	w.Header().Set("RateLimit-Limit", strconv.Itoa(d.limit))
 	w.Header().Set("RateLimit-Remaining", strconv.Itoa(d.remaining))
 	w.Header().Set("RateLimit-Reset", strconv.Itoa(reset))
@@ -241,7 +255,7 @@ func secondsUntil(target, now time.Time) int {
 
 func writeLimited(w http.ResponseWriter, d decision) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Retry-After", strconv.Itoa(secondsUntil(d.reset, time.Now())))
+	w.Header().Set("Retry-After", strconv.Itoa(secondsUntil(d.reset, d.now)))
 	w.WriteHeader(http.StatusTooManyRequests)
 	_ = json.NewEncoder(w).Encode(struct {
 		Error struct {
