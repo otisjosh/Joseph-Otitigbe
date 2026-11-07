@@ -591,9 +591,8 @@ components:
     RoleName:
       type: string
       enum: [reader, writer, admin]
-    APIKeyMetadata:
+    APIKeyFields:
       type: object
-      additionalProperties: false
       required: [id, public_id, name, role, created_at]
       properties:
         id:
@@ -628,16 +627,22 @@ components:
         role_changed_by_key_id:
           type: integer
           format: int64
-    APIKeyProvisioned:
+    APIKeyMetadata:
+      type: object
       allOf:
-        - $ref: '#/components/schemas/APIKeyMetadata'
+        - $ref: '#/components/schemas/APIKeyFields'
+      unevaluatedProperties: false
+    APIKeyProvisioned:
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/APIKeyFields'
         - type: object
           required: [api_key]
           properties:
             api_key:
               type: string
-              writeOnly: true
               description: Plaintext API key, returned once only.
+      unevaluatedProperties: false
     Role:
       type: object
       additionalProperties: false
