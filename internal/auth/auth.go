@@ -156,7 +156,16 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	return principal, ok
 }
 
+type RequestLimiter interface {
+	AllowRemoteAddr(remoteAddr string, w http.ResponseWriter) bool
+	AllowAPIKey(id int64, w http.ResponseWriter) bool
+}
+
 func Middleware(store KeyStore, next http.Handler) http.Handler {
+	return MiddlewareWithLimiter(store, next, nil)
+}
+
+func MiddlewareWithLimiter(store KeyStore, next http.Handler, limiter RequestLimiter) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
@@ -165,6 +174,9 @@ func Middleware(store KeyStore, next http.Handler) http.Handler {
 		required, protected := RequiredPermission(r.Method, r.URL.Path)
 		if !protected {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if limiter != nil && !limiter.AllowRemoteAddr(r.RemoteAddr, w) {
 			return
 		}
 		header := r.Header.Get("Authorization")
@@ -208,6 +220,9 @@ func Middleware(store KeyStore, next http.Handler) http.Handler {
 			return
 		} else if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication is temporarily unavailable")
+			return
+		}
+		if limiter != nil && !limiter.AllowAPIKey(credential.ID, w) {
 			return
 		}
 		if !hasPermission(credential.Permissions, required) {
