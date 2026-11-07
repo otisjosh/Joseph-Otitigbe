@@ -171,7 +171,7 @@ GitHub Actions are pinned to full upstream commit SHAs with release comments. Th
 
 ### Run scans locally
 
-Use Go 1.25 or newer and Docker. Install the same pinned scanner versions, then run:
+Use Go 1.26.10 or newer and Docker to match CI. Install the same pinned scanner versions, then run:
 
 ```sh
 go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
