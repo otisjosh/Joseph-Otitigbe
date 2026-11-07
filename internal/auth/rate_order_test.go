@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/otisjosh/Joseph-Otitigbe/internal/ratelimit"
+
 )
 
 type touchCountingStore struct {
@@ -94,4 +94,3 @@ func TestRevocationAfterLookupStillRejectsBeforeProtectedHandler(t *testing.T) {
 	}
 }
 
-var _ ratelimit.Config
