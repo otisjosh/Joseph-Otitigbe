@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/otisjosh/Joseph-Otitigbe/internal/audit"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/auth"
 )
 
@@ -21,7 +20,7 @@ func TestAPIKeyRotationIsAtomicPreservesMetadataAndAudits(t *testing.T) {
 	defer cancel()
 	store := NewKeyStore(pool)
 	manager := auth.NewKeyManager(store)
-	admin, adminToken, err := manager.Create(ctx, fmt.Sprintf("rotation-admin-%d", time.Now().UnixNano()), auth.RoleAdmin, nil)
+	admin, _, err := manager.Create(ctx, fmt.Sprintf("rotation-admin-%d", time.Now().UnixNano()), auth.RoleAdmin, nil)
 	if err != nil { t.Fatalf("create admin: %v", err) }
 	expiry := time.Now().UTC().Add(2*time.Hour).Truncate(time.Microsecond)
 	old, oldToken, err := manager.CreateWithExpiry(ctx, fmt.Sprintf("rotation-source-%d", time.Now().UnixNano()), auth.RoleWriter, &expiry, &admin.ID)
@@ -67,7 +66,6 @@ func TestAPIKeyRotationIsAtomicPreservesMetadataAndAudits(t *testing.T) {
 	if strings.Contains(string(encoded), oldToken) || strings.Contains(string(encoded), newToken) || strings.Contains(string(encoded), "key_hash") {
 		t.Fatalf("audit output exposed credentials: %s", encoded)
 	}
-	_ = adminToken
 }
 
 func TestAPIKeyRotationCanExplicitlyChangeRoleAndExpiry(t *testing.T) {
@@ -98,7 +96,7 @@ func TestAPIKeyRotationRejectsExpiredRevokedAndLastAdminDowngrade(t *testing.T) 
 	admin, _, err := manager.Create(ctx, fmt.Sprintf("rotation-last-admin-%d", time.Now().UnixNano()), auth.RoleAdmin, nil)
 	if err != nil { t.Fatal(err) }
 
-	writer, _, err := manager.Create(ctx, fmt.Sprintf("rotation-writer-%d", time.Now().UnixNano()), auth.RoleWriter, &admin.ID)
+	_, _, err := manager.Create(ctx, fmt.Sprintf("rotation-writer-%d", time.Now().UnixNano()), auth.RoleWriter, &admin.ID)
 	if err != nil { t.Fatal(err) }
 	downgrade := auth.RoleWriter
 	if _, _, err := manager.Rotate(ctx, admin.ID, &downgrade, nil, nil); !errors.Is(err, auth.ErrLastAdmin) {
@@ -125,7 +123,6 @@ func TestAPIKeyRotationRejectsExpiredRevokedAndLastAdminDowngrade(t *testing.T) 
 	if _, _, err := manager.Rotate(ctx, revoked.ID, nil, nil, &admin.ID); !errors.Is(err, auth.ErrKeyNotFound) {
 		t.Fatalf("revoked key rotation error = %v, want ErrKeyNotFound", err)
 	}
-	_ = writer
 }
 
 func TestAPIKeyRotationAuditFailureRollsBackBothKeys(t *testing.T) {
@@ -156,5 +153,3 @@ func TestAPIKeyRotationAuditFailureRollsBackBothKeys(t *testing.T) {
 	if rotations != 0 { t.Fatalf("rotation audit rows after failed transaction = %d", rotations) }
 }
 
-// Keep this import use explicit: rotation audit data is represented by the shared audit event contract.
-var _ audit.Event
