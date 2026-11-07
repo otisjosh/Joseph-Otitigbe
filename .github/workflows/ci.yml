@@ -46,3 +46,13 @@ jobs:
         run: go test -cover ./...
       - name: Vet
         run: go vet ./...
+
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container image
+        run: docker build --pull --tag atlas:ci .
+      - name: Verify non-root image user
+        run: test "$(docker image inspect --format '{{.Config.User}}' atlas:ci)" = "65532:65532"
