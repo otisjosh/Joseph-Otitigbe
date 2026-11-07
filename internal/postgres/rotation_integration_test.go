@@ -157,3 +157,46 @@ func TestAPIKeyRotationAuditFailureRollsBackBothKeys(t *testing.T) {
 	if rotations != 0 { t.Fatalf("rotation audit rows after failed transaction = %d", rotations) }
 }
 
+
+
+func TestConcurrentRotationsOfOneKeyCommitOnlyOnce(t *testing.T) {
+	pool := isolatedAuthPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	manager := auth.NewKeyManager(NewKeyStore(pool))
+	admin, _, err := manager.Create(ctx, fmt.Sprintf("rotation-concurrent-admin-%d", time.Now().UnixNano()), auth.RoleAdmin, nil)
+	if err != nil { t.Fatal(err) }
+	source, _, err := manager.Create(ctx, fmt.Sprintf("rotation-concurrent-source-%d", time.Now().UnixNano()), auth.RoleWriter, &admin.ID)
+	if err != nil { t.Fatal(err) }
+
+	start := make(chan struct{})
+	type outcome struct { metadata auth.KeyMetadata; err error }
+	results := make(chan outcome, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			metadata, _, err := manager.Rotate(ctx, source.ID, nil, nil, &admin.ID)
+			results <- outcome{metadata: metadata, err: err}
+		}()
+	}
+	close(start)
+	successes, rejected := 0, 0
+	for i := 0; i < 2; i++ {
+		result := <-results
+		switch {
+		case result.err == nil:
+			successes++
+		case errors.Is(result.err, auth.ErrKeyNotFound):
+			rejected++
+		default:
+			t.Fatalf("concurrent Rotate() error = %v", result.err)
+		}
+	}
+	if successes != 1 || rejected != 1 { t.Fatalf("rotation outcomes: success=%d rejected=%d", successes, rejected) }
+	var total, active int
+	if err := pool.QueryRow(ctx, "SELECT count(*), count(*) FILTER (WHERE revoked_at IS NULL) FROM atlas_api_keys WHERE name = $1", source.Name).Scan(&total, &active); err != nil { t.Fatal(err) }
+	if total != 2 || active != 1 { t.Fatalf("key rows after concurrent rotation: total=%d active=%d", total, active) }
+	var auditCount int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM atlas_audit_events WHERE action = $1", "api_key.rotated").Scan(&auditCount); err != nil { t.Fatal(err) }
+	if auditCount != 1 { t.Fatalf("rotation audit events=%d want=1", auditCount) }
+}
