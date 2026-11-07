@@ -158,7 +158,7 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 
 func Middleware(store KeyStore, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}
