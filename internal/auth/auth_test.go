@@ -453,3 +453,35 @@ func TestKeyManagerRotationPreservesRoleExpiryAndReturnsOneTimeReplacement(t *te
 		t.Fatalf("rotation metadata exposed secret/hash: %s", encoded)
 	}
 }
+
+
+func TestRotationHTTPReturnsSecretOnceAndSafeMetadata(t *testing.T) {
+	store := newMemoryKeyStore()
+	manager := NewKeyManager(store)
+	source, oldToken, err := manager.Create(context.Background(), "rotate through API", RoleWriter, nil)
+	if err != nil { t.Fatal(err) }
+	handler := NewKeyHandler(manager)
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api-keys/%d/rotate", source.ID), strings.NewReader(`{}`))
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey{}, Principal{KeyID: 10, Role: RoleAdmin}))
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated || res.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("rotation response=%d headers=%v body=%s", res.Code, res.Header(), res.Body)
+	}
+	var body struct {
+		APIKey string `json:"api_key"`
+		Role Role `json:"role"`
+		ExpiresAt *time.Time `json:"expires_at"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil { t.Fatal(err) }
+	if body.APIKey == "" || body.APIKey == oldToken || body.Role != RoleWriter || body.ExpiresAt != nil {
+		t.Fatalf("rotation response did not contain one-time replacement metadata: %+v", body)
+	}
+	listed, err := manager.List(context.Background())
+	if err != nil { t.Fatal(err) }
+	encoded, err := json.Marshal(listed)
+	if err != nil { t.Fatal(err) }
+	if strings.Contains(string(encoded), body.APIKey) || strings.Contains(string(encoded), "key_hash") {
+		t.Fatalf("key list exposed rotation secret/hash: %s", encoded)
+	}
+}
