@@ -191,7 +191,8 @@ func activeKeyRole(ctx context.Context, tx pgx.Tx, id int64) (auth.Role, error) 
 func ensureAnotherAdmin(ctx context.Context, tx pgx.Tx) error {
 	var count int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM atlas_api_keys
-		WHERE role_name = $1 AND revoked_at IS NULL`, string(auth.RoleAdmin)).Scan(&count); err != nil {
+		WHERE role_name = $1 AND revoked_at IS NULL
+		AND (expires_at IS NULL OR expires_at > clock_timestamp())`, string(auth.RoleAdmin)).Scan(&count); err != nil {
 		return fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
 	if count <= 1 {
@@ -216,7 +217,7 @@ func (s *KeyStore) RotateKey(ctx context.Context, oldID int64, newPublicID strin
 	var oldExpiry pgtype.Timestamptz
 	err = tx.QueryRow(ctx, `SELECT name, role_name, expires_at FROM atlas_api_keys
 		WHERE id = $1 AND revoked_at IS NULL
-		AND (expires_at IS NULL OR expires_at > now())
+		AND (expires_at IS NULL OR expires_at > clock_timestamp())
 		FOR UPDATE`, oldID).Scan(&name, &oldRole, &oldExpiry)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.KeyMetadata{}, auth.ErrKeyNotFound
@@ -257,7 +258,7 @@ func (s *KeyStore) RotateKey(ctx context.Context, oldID int64, newPublicID strin
 
 	tag, err := tx.Exec(ctx, `UPDATE atlas_api_keys SET revoked_at = now(), revoked_by_key_id = $2
 		WHERE id = $1 AND revoked_at IS NULL
-		AND (expires_at IS NULL OR expires_at > now())`, oldID, actor)
+		AND (expires_at IS NULL OR expires_at > clock_timestamp())`, oldID, actor)
 	if err != nil {
 		return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
 	}
