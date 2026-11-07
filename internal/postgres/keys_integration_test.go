@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/auth"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/records"
@@ -146,5 +147,148 @@ func TestKeyStoreDatabaseFailuresAreReturned(t *testing.T) {
 	defer cancel()
 	if _, err := NewKeyStore(pool).LookupKey(ctx, "public-selector"); !errors.Is(err, auth.ErrKeyStorageUnavailable) {
 		t.Fatalf("LookupKey() error = %v, want ErrKeyStorageUnavailable", err)
+	}
+}
+
+
+// TestLastAdministratorCannotBeRevokedOrDowngraded verifies the guard and confirms
+// that both operations remain available while another active admin exists.
+
+func isolatedAuthPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("DATABASE_URL is not set; PostgreSQL integration test skipped")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	adminPool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create schema admin pool: %v", err)
+	}
+	schema := fmt.Sprintf("atlas_auth_test_%d", testEmailCounter.Add(1))
+	identifier := pgx.Identifier{schema}.Sanitize()
+	if _, err := adminPool.Exec(ctx, "CREATE SCHEMA "+identifier); err != nil {
+		adminPool.Close()
+		t.Fatalf("create isolated auth schema: %v", err)
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		_, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+identifier+" CASCADE")
+		adminPool.Close()
+		t.Fatalf("parse integration database URL: %v", err)
+	}
+	if config.ConnConfig.RuntimeParams == nil {
+		config.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = identifier
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		_, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+identifier+" CASCADE")
+		adminPool.Close()
+		t.Fatalf("create isolated auth pool: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer dropCancel()
+		_, _ = adminPool.Exec(dropCtx, "DROP SCHEMA "+identifier+" CASCADE")
+		adminPool.Close()
+	})
+	if err := RunMigrations(ctx, pool); err != nil {
+		t.Fatalf("run isolated auth migrations: %v", err)
+	}
+	return pool
+}
+
+func TestLastAdministratorCannotBeRevokedOrDowngraded(t *testing.T) {
+	pool := isolatedAuthPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	manager := auth.NewKeyManager(NewKeyStore(pool))
+	createAdmin := func(name string) auth.KeyMetadata {
+		t.Helper()
+		metadata, _, err := manager.Create(ctx, fmt.Sprintf("%s-%d", name, time.Now().UnixNano()), auth.RoleAdmin, nil)
+		if err != nil {
+			t.Fatalf("create admin %s: %v", name, err)
+		}
+		return metadata
+	}
+
+	first := createAdmin("lockout-first")
+	second := createAdmin("lockout-second")
+	if _, err := manager.Revoke(ctx, first.ID, nil); err != nil {
+		t.Fatalf("revoke admin with another active admin: %v", err)
+	}
+	third := createAdmin("lockout-third")
+	if _, err := manager.ChangeRole(ctx, second.ID, auth.RoleWriter, nil); err != nil {
+		t.Fatalf("downgrade admin with another active admin: %v", err)
+	}
+
+	if _, err := manager.Revoke(ctx, third.ID, nil); !errors.Is(err, auth.ErrLastAdmin) {
+		t.Fatalf("revoke last admin error = %v, want ErrLastAdmin", err)
+	}
+	if _, err := manager.ChangeRole(ctx, third.ID, auth.RoleReader, nil); !errors.Is(err, auth.ErrLastAdmin) {
+		t.Fatalf("downgrade last admin error = %v, want ErrLastAdmin", err)
+	}
+	var activeAdmins int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM atlas_api_keys
+		WHERE role_name = $1 AND revoked_at IS NULL`, string(auth.RoleAdmin)).Scan(&activeAdmins); err != nil {
+		t.Fatalf("count active administrators: %v", err)
+	}
+	if activeAdmins != 1 {
+		t.Fatalf("active administrators = %d, want 1", activeAdmins)
+	}
+}
+
+// Concurrent removals serialize on the PostgreSQL advisory lock so only one
+// of two administrators can be removed when the other would be the last.
+func TestConcurrentAdministratorRemovalsCannotLockOutAllAdmins(t *testing.T) {
+	pool := isolatedAuthPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	manager := auth.NewKeyManager(NewKeyStore(pool))
+	createAdmin := func(name string) auth.KeyMetadata {
+		t.Helper()
+		metadata, _, err := manager.Create(ctx, fmt.Sprintf("%s-%d", name, time.Now().UnixNano()), auth.RoleAdmin, nil)
+		if err != nil {
+			t.Fatalf("create admin %s: %v", name, err)
+		}
+		return metadata
+	}
+	first, second := createAdmin("concurrent-first"), createAdmin("concurrent-second")
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, id := range []int64{first.ID, second.ID} {
+		id := id
+		go func() {
+			<-start
+			_, err := manager.Revoke(ctx, id, nil)
+			errs <- err
+		}()
+	}
+	close(start)
+	err1, err2 := <-errs, <-errs
+	successes, protected := 0, 0
+	for _, err := range []error{err1, err2} {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, auth.ErrLastAdmin):
+			protected++
+		default:
+			t.Fatalf("concurrent Revoke() error = %v, want success or ErrLastAdmin", err)
+		}
+	}
+	if successes != 1 || protected != 1 {
+		t.Fatalf("concurrent outcomes: successes=%d protected=%d, want 1 each", successes, protected)
+	}
+	var activeAdmins int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM atlas_api_keys
+		WHERE role_name = $1 AND revoked_at IS NULL`, string(auth.RoleAdmin)).Scan(&activeAdmins); err != nil {
+		t.Fatalf("count active administrators: %v", err)
+	}
+	if activeAdmins != 1 {
+		t.Fatalf("active administrators = %d, want 1", activeAdmins)
 	}
 }
