@@ -116,6 +116,14 @@ A successful response has an `events` array:
 
 An empty page is returned as `{"events":[]}`. Events record successful record creation and API-key creation, role changes, and revocation. They omit API keys, hashes, record names, and emails. Reads and failed authentication attempts are not currently recorded.
 
+## Rate limits and overload
+
+Normal application requests share a global in-flight request limit (default 256). Health probes use reserved capacity separate from normal requests: at most 16 liveness handlers and 2 readiness checks run concurrently. The readiness endpoint also bounds each PostgreSQL ping to two seconds, so excess probes fail fast with 503 rather than creating unbounded database work. Protected-route requests use a source-address fixed-window budget (default 600 requests per minute) before authentication; after key selector lookup and secret verification, authenticated requests use a per-API-key budget (default 120 per minute) before the last-used/revocation recheck write. These limits can be configured with `ATLAS_MAX_CONCURRENT_REQUESTS`, `ATLAS_RATE_LIMIT_PER_IP`, `ATLAS_RATE_LIMIT_PER_KEY`, and `ATLAS_RATE_LIMIT_WINDOW`. Set either identity rate to `0` to disable that budget; the concurrency limit remains required. Configuration is loaded at startup and requires a restart to change.
+
+Rate-limited requests return `429 Too Many Requests` with the standard JSON error shape and code `rate_limited`. Identity-limit responses include `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (seconds until reset), and `Retry-After`; normal concurrency overload includes `Retry-After`. Health-reserved-capacity overload returns `503` with `Retry-After` and a safe JSON error.
+
+Source addresses come only from the TCP connection's `RemoteAddr`. Atlas does not trust `Forwarded` or `X-Forwarded-For`. Clients sharing a reverse proxy therefore share its IP budget. Limit state is bounded and in-memory per application instance; it is not coordinated across replicas. When a client table is full, new identities are rejected until expired entries are cleaned up.
+
 ## Errors and methods
 
 | Status | Meaning | Common codes |
