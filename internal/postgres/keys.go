@@ -241,6 +241,13 @@ func (s *KeyStore) RotateKey(ctx context.Context, oldID int64, newPublicID strin
 		newExpiry = &value
 	}
 	if requestedExpiry != nil {
+		var future bool
+		if err := tx.QueryRow(ctx, "SELECT $1::timestamptz > clock_timestamp()", requestedExpiry.UTC()).Scan(&future); err != nil {
+			return auth.KeyMetadata{}, fmt.Errorf("%w: %v", auth.ErrKeyStorageUnavailable, err)
+		}
+		if !future {
+			return auth.KeyMetadata{}, auth.ErrInvalidExpiry
+		}
 		value := requestedExpiry.UTC()
 		newExpiry = &value
 	}
