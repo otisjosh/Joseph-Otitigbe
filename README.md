@@ -19,6 +19,20 @@ export DATABASE_URL='postgres://<user>:<password>@localhost:5432/atlas?sslmode=d
 export ATLAS_ADDR=':8080'
 ```
 
+Atlas also applies bounded request-abuse controls. Defaults are:
+
+```dotenv
+ATLAS_MAX_CONCURRENT_REQUESTS=256
+ATLAS_RATE_LIMIT_PER_KEY=120
+ATLAS_RATE_LIMIT_PER_IP=600
+ATLAS_RATE_LIMIT_WINDOW=1m
+ATLAS_RATE_LIMIT_MAX_CLIENTS=10000
+```
+
+The concurrency setting must be between 1 and 10,000. Per-key and per-IP limits can be disabled individually with `0`; the default window must be between 1 second and 24 hours. The client-table capacity is bounded to 1–100,000 entries per category. Invalid values stop startup with a setting-specific message that does not include the supplied value. Changes take effect after restarting Atlas; limits are not hot-reloaded.
+
+The source-address budget is applied to protected-route requests before authentication using the socket's `RemoteAddr`. The per-key budget is then applied after key validation and revocation checks. Atlas ignores `Forwarded` and `X-Forwarded-For` headers. When multiple clients connect through a proxy, they share the proxy's source-address budget. Rate state is in memory per Atlas process and does not coordinate across replicas. A full table rejects new identities with `429` until expired entries are cleaned; existing entries remain bounded and usable within their configured budgets.
+
 Use `sslmode=disable` only for trusted local PostgreSQL. Require TLS for deployed databases. Prefer certificate and hostname verification with `sslmode=verify-full` and your provider's trusted CA configuration; use `sslmode=require` only when encryption without server identity verification is an accepted deployment policy. URL-encode reserved characters in connection credentials.
 
 ## Database migrations
