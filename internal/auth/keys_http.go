@@ -110,6 +110,34 @@ func (h *KeyHandler) manageKey(w http.ResponseWriter, r *http.Request) {
 	}
 	actor := principal.KeyID
 	switch {
+	case len(parts) == 2 && parts[1] == "rotate" && r.Method == http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		var input struct {
+			Role      *Role      `json:"role"`
+			ExpiresAt *time.Time `json:"expires_at"`
+		}
+		if err := decoder.Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be a JSON object with optional role and expires_at")
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); err != io.EOF {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request must contain exactly one JSON object")
+			return
+		}
+		metadata, token, err := h.manager.Rotate(r.Context(), id, input.Role, input.ExpiresAt, &actor)
+		if err != nil {
+			writeManagerError(w, err, "unable to rotate API key")
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		writeJSON(w, http.StatusCreated, struct {
+			KeyMetadata
+			APIKey string `json:"api_key"`
+		}{KeyMetadata: metadata, APIKey: token})
 	case len(parts) == 1 && r.Method == http.MethodDelete:
 		metadata, err := h.manager.Revoke(r.Context(), id, &actor)
 		if err != nil {
@@ -140,7 +168,11 @@ func (h *KeyHandler) manageKey(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, metadata)
 	default:
-		methodNotAllowed(w, "PATCH, DELETE")
+		if len(parts) == 2 && parts[1] == "rotate" {
+			methodNotAllowed(w, http.MethodPost)
+		} else {
+			methodNotAllowed(w, "PATCH, DELETE")
+		}
 	}
 }
 
