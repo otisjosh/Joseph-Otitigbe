@@ -158,3 +158,35 @@ go vet ./...
 ## Security notes
 
 API keys may be provisioned with an optional UTC expiry. Omitted or `NULL` expiry means the key does not expire, including existing keys. Expiry is enforced during authentication and expired keys are rejected before protected handlers. Rotation creates the replacement and revokes its source in one audited database transaction. The replacement keeps the source role and expiry unless an explicit role or future expiry is supplied; omitted or null expiry never clears a configured expiry. The last active administrator cannot be rotated to a non-admin role. Store the returned secret securely because it is shown only once. The HTTP server does not terminate TLS; deploy it behind a trusted HTTPS endpoint. Store database credentials and one-time API keys using approved secret-management tools. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
+
+
+## Supply-chain security checks
+
+Pull requests and pushes to `main` or `feature/**` run the existing PostgreSQL 16 integration tests, race checks, coverage, vet, OpenAPI lint, and Docker non-root verification. CI also runs:
+
+- **govulncheck v1.1.4** against the Go packages. It reports vulnerabilities in dependencies that affect reachable code; a finding fails the job. Findings are reviewed and fixed or explicitly risk-assessed before merge; no vulnerability suppression file is used.
+- **Trivy v0.76.2** against the built image, scanning OS packages and application libraries. HIGH and CRITICAL findings fail CI, including findings without an available fix. Findings are reviewed, the base/dependency is updated where possible, and any accepted risk must be documented through normal review. This scan is not proof that Atlas is vulnerability-free.
+
+GitHub Actions are pinned to full upstream commit SHAs with release comments. The Go builder image is pinned to the multi-architecture index digest `sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59`. The Distroless Debian 13 nonroot runtime uses its versioned upstream tag; its registry index digest was not available for independent verification during this change, so it remains a mutable reference. Review that pin and convert it to an upstream-verified digest when registry metadata is available. Distroless publishes this image for amd64, arm64, arm, s390x, ppc64le, and riscv64; CI currently builds on GitHub-hosted amd64 runners. See the upstream [Distroless image list](https://github.com/GoogleContainerTools/distroless#what-images-are-available).
+
+### Run scans locally
+
+Use Go 1.25 or newer and Docker. Install the same pinned scanner versions, then run:
+
+```sh
+go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+govulncheck ./...
+docker build --pull --tag atlas:local .
+```
+
+Install the official Trivy CLI v0.76.2, then:
+
+```sh
+trivy image --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --ignore-unfixed=false --exit-code 1 atlas:local
+```
+
+The scanner reports selected severity findings and exits nonzero on them; no ignore policy is configured. Redocly validation and the Go checks are documented above.
+
+### Dependency and image updates
+
+Dependabot opens weekly update pull requests for Go modules, GitHub Actions, and Dockerfile image references. It does not auto-merge or apply dependency updates; review each diff, changelog, scanner output, tests, and compatibility before merging. When changing an image pin, verify the release and multi-platform manifest digest at the upstream registry, check supported architectures, update the adjacent version comment/documentation, then run the Docker build and Trivy scan. Do not replace a pinned reference with a moving tag without review.
