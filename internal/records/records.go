@@ -1,6 +1,7 @@
 package records
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,23 +17,30 @@ const maxRequestBody = 1 << 20
 var (
 	ErrInvalidRecord = errors.New("name and a valid email are required")
 	ErrDuplicate     = errors.New("a record with this email already exists")
+	ErrNotFound      = errors.New("record not found")
+	ErrUnavailable   = errors.New("record storage unavailable")
 )
 
 type Record struct {
-	ID    int    `json:"id"`
+	ID    int64  `json:"id"`
 	Name  string `json:"name"`
 	Email string `json:"email"`
 }
 
+type Repository interface {
+	Create(ctx context.Context, name, email string) (Record, error)
+	Get(ctx context.Context, id int64) (Record, error)
+}
+
 type Store struct {
 	mu      sync.RWMutex
-	nextID  int
-	records map[int]Record
-	emails  map[string]int
+	nextID  int64
+	records map[int64]Record
+	emails  map[string]int64
 }
 
 func NewStore() *Store {
-	return &Store{nextID: 1, records: make(map[int]Record), emails: make(map[string]int)}
+	return &Store{nextID: 1, records: make(map[int64]Record), emails: make(map[string]int64)}
 }
 
 func normalizeEmail(email string) string {
@@ -68,16 +76,30 @@ func validEmail(email string) bool {
 	return true
 }
 
-func (s *Store) Create(name, email string) (Record, error) {
+func ValidateRecord(name, email string) (string, string, error) {
 	name = strings.TrimSpace(name)
 	email = strings.TrimSpace(email)
 	if name == "" || !validEmail(email) {
-		return Record{}, ErrInvalidRecord
+		return "", "", ErrInvalidRecord
+	}
+	return name, email, nil
+}
+
+func (s *Store) Create(ctx context.Context, name, email string) (Record, error) {
+	if err := ctx.Err(); err != nil {
+		return Record{}, err
+	}
+	name, email, err := ValidateRecord(name, email)
+	if err != nil {
+		return Record{}, err
 	}
 
 	key := normalizeEmail(email)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Record{}, err
+	}
 	if _, exists := s.emails[key]; exists {
 		return Record{}, ErrDuplicate
 	}
@@ -88,19 +110,25 @@ func (s *Store) Create(name, email string) (Record, error) {
 	return record, nil
 }
 
-func (s *Store) Get(id int) (Record, bool) {
+func (s *Store) Get(ctx context.Context, id int64) (Record, error) {
+	if err := ctx.Err(); err != nil {
+		return Record{}, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	record, ok := s.records[id]
-	return record, ok
+	if !ok {
+		return Record{}, ErrNotFound
+	}
+	return record, nil
 }
 
 type Handler struct {
-	store *Store
+	repository Repository
 }
 
-func NewHandler() http.Handler {
-	return &Handler{store: NewStore()}
+func NewHandler(repository Repository) http.Handler {
+	return &Handler{repository: repository}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -176,12 +204,17 @@ func (h *Handler) createRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	record, err := h.store.Create(input.Name, input.Email)
-	switch {
-	case errors.Is(err, ErrInvalidRecord):
+	name, email, err := ValidateRecord(input.Name, input.Email)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_record", err.Error())
+		return
+	}
+	record, err := h.repository.Create(r.Context(), name, email)
+	switch {
 	case errors.Is(err, ErrDuplicate):
 		writeError(w, http.StatusConflict, "duplicate_record", err.Error())
+	case errors.Is(err, ErrUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "record storage is temporarily unavailable")
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, "internal_error", "unable to create record")
 	default:
@@ -191,15 +224,20 @@ func (h *Handler) createRecord(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getRecord(w http.ResponseWriter, r *http.Request) {
 	rawID := strings.TrimPrefix(r.URL.Path, "/records/")
-	id, err := strconv.Atoi(rawID)
-	if err != nil || id < 1 || strconv.Itoa(id) != rawID {
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil || id < 1 || strconv.FormatInt(id, 10) != rawID {
 		writeError(w, http.StatusBadRequest, "invalid_record_id", "record ID must be a positive integer")
 		return
 	}
-	record, ok := h.store.Get(id)
-	if !ok {
+	record, err := h.repository.Get(r.Context(), id)
+	switch {
+	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "record not found")
-		return
+	case errors.Is(err, ErrUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "record storage is temporarily unavailable")
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "internal_error", "unable to retrieve record")
+	default:
+		writeJSON(w, http.StatusOK, record)
 	}
-	writeJSON(w, http.StatusOK, record)
 }

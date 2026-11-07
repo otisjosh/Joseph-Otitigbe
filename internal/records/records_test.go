@@ -1,6 +1,7 @@
 package records
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,18 +11,30 @@ import (
 
 func TestCreateValidatesAndDetectsDuplicates(t *testing.T) {
 	store := NewStore()
-	record, err := store.Create(" Ada Lovelace ", " ada@example.com ")
+	record, err := store.Create(context.Background(), " Ada Lovelace ", " ada@example.com ")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 	if record.ID != 1 || record.Name != "Ada Lovelace" || record.Email != "ada@example.com" {
 		t.Fatalf("unexpected record: %+v", record)
 	}
-	if _, err := store.Create("Another Name", "ADA@example.com"); !errors.Is(err, ErrDuplicate) {
+	if _, err := store.Create(context.Background(), "Another Name", "ADA@example.com"); !errors.Is(err, ErrDuplicate) {
 		t.Fatalf("duplicate error = %v, want ErrDuplicate", err)
 	}
-	if _, err := store.Create(" ", "bad"); !errors.Is(err, ErrInvalidRecord) {
+	if _, err := store.Create(context.Background(), " ", "bad"); !errors.Is(err, ErrInvalidRecord) {
 		t.Fatalf("invalid input error = %v, want ErrInvalidRecord", err)
+	}
+}
+
+func TestStoreHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := NewStore()
+	if _, err := store.Create(ctx, "Ada", "ada@example.com"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Create() error = %v, want context.Canceled", err)
+	}
+	if _, err := store.Get(ctx, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Get() error = %v, want context.Canceled", err)
 	}
 }
 
@@ -60,7 +73,7 @@ func performRequest(handler http.Handler, method, path, body string) *httptest.R
 }
 
 func TestHandlerCreateDuplicateAndGet(t *testing.T) {
-	handler := NewHandler()
+	handler := NewHandler(NewStore())
 	first := performRequest(handler, http.MethodPost, "/records", `{"name":"Ada","email":"ada@example.com"}`)
 	if first.Code != http.StatusCreated {
 		t.Fatalf("first create status = %d, want %d: %s", first.Code, http.StatusCreated, first.Body)
@@ -75,8 +88,40 @@ func TestHandlerCreateDuplicateAndGet(t *testing.T) {
 	}
 }
 
+type failedRepository struct {
+	err error
+}
+
+func (f failedRepository) Create(context.Context, string, string) (Record, error) {
+	return Record{}, f.err
+}
+
+func (f failedRepository) Get(context.Context, int64) (Record, error) {
+	return Record{}, f.err
+}
+
+func TestHandlerReturnsServiceUnavailableForStorageErrors(t *testing.T) {
+	handler := NewHandler(failedRepository{err: ErrUnavailable})
+	create := performRequest(handler, http.MethodPost, "/records", `{"name":"Ada","email":"ada@example.com"}`)
+	if create.Code != http.StatusServiceUnavailable || !strings.Contains(create.Body.String(), "storage_unavailable") {
+		t.Fatalf("create response = %d %q, want 503 storage_unavailable", create.Code, create.Body.String())
+	}
+	get := performRequest(handler, http.MethodGet, "/records/1", "")
+	if get.Code != http.StatusServiceUnavailable || !strings.Contains(get.Body.String(), "storage_unavailable") {
+		t.Fatalf("get response = %d %q, want 503 storage_unavailable", get.Code, get.Body.String())
+	}
+}
+
+func TestHandlerReturnsNotFoundForMissingRecord(t *testing.T) {
+	handler := NewHandler(NewStore())
+	res := performRequest(handler, http.MethodGet, "/records/8", "")
+	if res.Code != http.StatusNotFound || !strings.Contains(res.Body.String(), "not_found") {
+		t.Fatalf("missing record response = %d %q", res.Code, res.Body.String())
+	}
+}
+
 func TestHandlerRejectsMalformedJSONAndUnknownFields(t *testing.T) {
-	handler := NewHandler()
+	handler := NewHandler(NewStore())
 	for _, body := range []string{`{"name":"Ada","email":"ada@example.com","extra":true}`, "{", `{"name":"Ada","email":"ada@example.com"} trailing`, `{"name":" ","email":"bad"}`} {
 		res := performRequest(handler, http.MethodPost, "/records", body)
 		if res.Code != http.StatusBadRequest {
@@ -89,7 +134,7 @@ func TestHandlerRejectsMalformedJSONAndUnknownFields(t *testing.T) {
 }
 
 func TestHandlerRejectsOversizedRequest(t *testing.T) {
-	handler := NewHandler()
+	handler := NewHandler(NewStore())
 	body := `{"name":"` + strings.Repeat("a", maxRequestBody) + `","email":"ada@example.com"}`
 	res := performRequest(handler, http.MethodPost, "/records", body)
 	if res.Code != http.StatusRequestEntityTooLarge {
@@ -101,7 +146,7 @@ func TestHandlerRejectsOversizedRequest(t *testing.T) {
 }
 
 func TestGetRejectsMalformedRecordIDs(t *testing.T) {
-	handler := NewHandler()
+	handler := NewHandler(NewStore())
 	for _, id := range []string{"abc", "-1", "0", "1junk", "01", "1/extra", ""} {
 		res := performRequest(handler, http.MethodGet, "/records/"+id, "")
 		if res.Code != http.StatusBadRequest {
@@ -121,7 +166,7 @@ func TestUnsupportedMethodsReturnJSON405AndAllow(t *testing.T) {
 		{http.MethodPatch, "/records/1", http.MethodGet},
 		{http.MethodPost, "/healthz", http.MethodGet},
 	} {
-		res := performRequest(NewHandler(), test.method, test.path, "")
+		res := performRequest(NewHandler(NewStore()), test.method, test.path, "")
 		if res.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s %s status = %d, want %d", test.method, test.path, res.Code, http.StatusMethodNotAllowed)
 		}
@@ -134,15 +179,11 @@ func TestUnsupportedMethodsReturnJSON405AndAllow(t *testing.T) {
 	}
 }
 
-func TestHealthAndNotFound(t *testing.T) {
-	handler := NewHandler()
+func TestHealthAndUnknownRoute(t *testing.T) {
+	handler := NewHandler(NewStore())
 	health := performRequest(handler, http.MethodGet, "/healthz", "")
 	if health.Code != http.StatusOK {
 		t.Fatalf("health status = %d, want %d", health.Code, http.StatusOK)
-	}
-	missing := performRequest(handler, http.MethodGet, "/records/8", "")
-	if missing.Code != http.StatusNotFound {
-		t.Fatalf("missing record status = %d, want %d", missing.Code, http.StatusNotFound)
 	}
 	unknown := performRequest(handler, http.MethodGet, "/unknown", "")
 	if unknown.Code != http.StatusNotFound || !strings.Contains(unknown.Body.String(), "not_found") {
