@@ -261,6 +261,11 @@ func middlewareWithClock(store KeyStore, next http.Handler, limiter RequestLimit
 			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication is temporarily unavailable")
 			return
 		}
+		if credential.ExpiresAt != nil && !now().UTC().Before(credential.ExpiresAt.UTC()) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(w, http.StatusUnauthorized, "invalid_api_key", "the bearer API key is invalid")
+			return
+		}
 		if !hasPermission(credential.Permissions, required) {
 			writeError(w, http.StatusForbidden, "permission_denied", "the API key does not have permission for this operation")
 			return
