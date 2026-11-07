@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -327,7 +328,7 @@ func TestMiddlewareEnforcesExpiryBoundaryAndNullExpiry(t *testing.T) {
 		want int
 	}{
 		{name: "non-expiring existing key", want: http.StatusNoContent},
-		{name: "not expired", expiry: ptrTime(now.Add(-time.Nanosecond)), want: http.StatusUnauthorized},
+		{name: "not expired", expiry: ptrTime(now.Add(time.Nanosecond)), want: http.StatusNoContent},
 		{name: "future expiry", expiry: ptrTime(now.Add(time.Second)), want: http.StatusNoContent},
 		{name: "expiry reached", expiry: ptrTime(now), want: http.StatusUnauthorized},
 		{name: "expired in past", expiry: ptrTime(now.Add(-time.Second)), want: http.StatusUnauthorized},
