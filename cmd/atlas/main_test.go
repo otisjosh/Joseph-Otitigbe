@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/otisjosh/Joseph-Otitigbe/internal/observability"
 	"github.com/otisjosh/Joseph-Otitigbe/internal/postgres"
 )
 
