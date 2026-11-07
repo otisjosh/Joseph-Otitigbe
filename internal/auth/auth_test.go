@@ -68,6 +68,41 @@ func (s *memoryKeyStore) CreateKeyWithExpiry(ctx context.Context, name string, r
 	return metadata, nil
 }
 
+func (s *memoryKeyStore) RotateKey(_ context.Context, oldID int64, newPublicID string, newHash []byte, requestedRole *Role, requestedExpiry *time.Time, actor *int64) (KeyMetadata, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, ok := s.metadata[oldID]
+	if !ok || old.RevokedAt != nil {
+		return KeyMetadata{}, ErrKeyNotFound
+	}
+	if old.ExpiresAt != nil && !time.Now().UTC().Before(old.ExpiresAt.UTC()) {
+		return KeyMetadata{}, ErrKeyNotFound
+	}
+	role := old.Role
+	if requestedRole != nil { role = *requestedRole }
+	if old.Role == RoleAdmin && role != RoleAdmin {
+		admins := 0
+		for _, metadata := range s.metadata {
+			if metadata.Role == RoleAdmin && metadata.RevokedAt == nil { admins++ }
+		}
+		if admins <= 1 { return KeyMetadata{}, ErrLastAdmin }
+	}
+	expiresAt := old.ExpiresAt
+	if requestedExpiry != nil { value := requestedExpiry.UTC(); expiresAt = &value }
+	now := time.Now().UTC()
+	replacement := KeyMetadata{ID: s.nextID, PublicID: newPublicID, Name: old.Name, Role: role, CreatedAt: now, CreatedByKeyID: actor, ExpiresAt: expiresAt}
+	s.nextID++
+	s.metadata[replacement.ID] = replacement
+	var permissions []Permission
+	for _, info := range s.roles { if info.Name == role { permissions = info.Permissions } }
+	s.credentials[newPublicID] = Credential{ID: replacement.ID, PublicID: newPublicID, Hash: append([]byte(nil), newHash...), Role: role, Permissions: permissions, ExpiresAt: expiresAt}
+	old.RevokedAt = &now
+	old.RevokedByKeyID = actor
+	s.metadata[oldID] = old
+	delete(s.credentials, old.PublicID)
+	return replacement, nil
+}
+
 func (s *memoryKeyStore) LookupKey(_ context.Context, publicID string) (Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -385,5 +420,36 @@ func TestKeyManagerRejectsNonFutureExpiryAndUsesUTC(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if metadata.ExpiresAt == nil || metadata.ExpiresAt.Location() != time.UTC || !metadata.ExpiresAt.Equal(future) {
 		t.Fatalf("expiry metadata not normalized to UTC: %+v", metadata.ExpiresAt)
+	}
+}
+
+
+func TestKeyManagerRotationPreservesRoleExpiryAndReturnsOneTimeReplacement(t *testing.T) {
+	store := newMemoryKeyStore()
+	manager := NewKeyManager(store)
+	ctx := context.Background()
+	expiry := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
+	old, oldToken, err := manager.CreateWithExpiry(ctx, "rotate me", RoleWriter, &expiry, nil)
+	if err != nil { t.Fatal(err) }
+	replacement, newToken, err := manager.Rotate(ctx, old.ID, nil, nil, nil)
+	if err != nil { t.Fatalf("Rotate() error = %v", err) }
+	if replacement.Role != RoleWriter || replacement.ExpiresAt == nil || !replacement.ExpiresAt.Equal(expiry) {
+		t.Fatalf("replacement did not preserve role/expiry: %+v", replacement)
+	}
+	if newToken == "" || newToken == oldToken { t.Fatal("rotation did not produce a fresh one-time key") }
+	handler := Middleware(store, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	for _, tc := range []struct{name, token string; want int}{{"old", oldToken, http.StatusUnauthorized}, {"new", newToken, http.StatusNoContent}} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/records/1", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != tc.want { t.Fatalf("status=%d want=%d body=%s", res.Code, tc.want, res.Body) }
+		})
+	}
+	encoded, err := json.Marshal(replacement)
+	if err != nil { t.Fatal(err) }
+	if strings.Contains(string(encoded), oldToken) || strings.Contains(string(encoded), newToken) || strings.Contains(string(encoded), "key_hash") {
+		t.Fatalf("rotation metadata exposed secret/hash: %s", encoded)
 	}
 }
