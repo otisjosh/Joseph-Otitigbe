@@ -10,7 +10,7 @@ Every request receives a new random request ID in the `X-Request-ID` response he
 
 ## Authentication
 
-Send an API key on every route except `GET /healthz`:
+`GET /healthz` and `GET /readyz` are public and do not require an API key. Send an API key on all other routes:
 ```http
 Authorization: Bearer atlas_<public-id>.<secret>
 ```
